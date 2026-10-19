@@ -427,6 +427,22 @@ async def _bootstrap_with_page_send(
             captured["body"] = str(in_page_tpl["body"])
 
     t0 = time.time()
+
+    async def _finish_capture(loop_index: int) -> dict[str, object]:
+        """截获成功后的统一收尾：停生成、还原输入框、清对话框。"""
+        with suppress(Exception):
+            await page.evaluate(STOP_GENERATION_JS)
+        await page.fill("textarea", original_text)
+        with suppress(Exception):
+            await page.evaluate(DOM_GC_CLEANUP_JS)
+        log.info(
+            "BotGuard 握手成功并截获模板（page_send 模式），耗时 %d 秒 (累计 %.1f 秒)",
+            loop_index + 1,
+            time.time() - t0,
+        )
+        captured["bootstrap_mode"] = "page_send"
+        return captured
+
     try:
         original_text = str(
             (
@@ -465,19 +481,7 @@ async def _bootstrap_with_page_send(
             with suppress(Exception):
                 await harvest_in_page_template()
             if captured:
-                with suppress(Exception):
-                    await page.evaluate(STOP_GENERATION_JS)
-                await page.fill("textarea", original_text)
-                with suppress(Exception):
-                    await page.evaluate(DOM_GC_CLEANUP_JS)
-
-                log.info(
-                    "BotGuard 握手成功并截获模板（page_send 模式），耗时 %d 秒 (累计 %.1f 秒)",
-                    i + 1,
-                    time.time() - t0,
-                )
-                captured["bootstrap_mode"] = "page_send"
-                return captured
+                return await _finish_capture(i)
 
             if await page.evaluate("() => !!window.__AISTUDIO__?.service"):
                 # 服务已在：页面这一次请求应该已经发出去了，再给 2.5 秒收模板
@@ -490,18 +494,7 @@ async def _bootstrap_with_page_send(
                         break
                     await page.wait_for_timeout(100)
                 if captured:
-                    with suppress(Exception):
-                        await page.evaluate(STOP_GENERATION_JS)
-                    await page.fill("textarea", original_text)
-                    with suppress(Exception):
-                        await page.evaluate(DOM_GC_CLEANUP_JS)
-                    log.info(
-                        "BotGuard 握手成功并截获模板（page_send 模式），耗时 %d 秒 (累计 %.1f 秒)",
-                        i + 1,
-                        time.time() - t0,
-                    )
-                    captured["bootstrap_mode"] = "page_send"
-                    return captured
+                    return await _finish_capture(i)
 
         raise RuntimeError(f"BotGuardService capture timeout after {max_wait_seconds}s")
     finally:

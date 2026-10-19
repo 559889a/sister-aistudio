@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -67,19 +68,19 @@ class AIStudioClient:
         profile_suffix: str = "",
     ):
         self.port = port
-        self._captured: CapturedRequest | None = None
         # 池模式：每台 worker 用自己的 auth_file + profile 后缀（-w0/-w1），互不踩 profile
         self._session = BrowserSession(
             port=port, auth_file=auth_file, profile_suffix=profile_suffix
         )
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
-
         self._streaming_gateway = StreamingGateway(session=self._session)
+
     @property
     def session(self) -> BrowserSession:
         """Expose active browser session facade."""
         return self._session
+
     async def warmup(self) -> None:
         """预热浏览器后端并加载 AI Studio 页面及捕获 BotGuard 服务。"""
         if self._session is not None:
@@ -117,7 +118,7 @@ class AIStudioClient:
         out_dir = Path(settings.dump_raw_response_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         safe_model = model.replace("/", "_")
-        timestamp = __import__("time").strftime("%Y%m%d_%H%M%S")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
         payload = {
             "kind": kind,
             "model": model,
@@ -166,9 +167,6 @@ class AIStudioClient:
             sanitize_plain_text=sanitize_plain_text,
             force_refresh=force_refresh,
         )
-
-    async def replay(self, body: str) -> tuple[int, bytes]:
-        return await self._replay_service.replay(self._captured, body=body)
 
     @staticmethod
     def _restore_runtime_output(

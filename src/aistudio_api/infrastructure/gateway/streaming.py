@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def _dump_stream_exchange(
     out_dir = Path(settings.dump_raw_response_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_model = model.replace("/", "_")
-    timestamp = __import__("time").strftime("%Y%m%d_%H%M%S")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
     payload = {
         "kind": "stream_generate_content",
         "model": model,
@@ -172,8 +173,8 @@ class StreamingGateway:
 
         async for event_type, payload in self._session.send_streaming_request(
             body=modified_body,
-            url=captured.url if captured else None,
-            headers=captured.headers if captured else None,
+            url=captured.url,
+            headers=captured.headers,
         ):
             if event_type == "status" and payload and not status_code:
                 status_code = int(str(payload))

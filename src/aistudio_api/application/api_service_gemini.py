@@ -121,6 +121,20 @@ def to_gemini_finish_reason(wire_code: int | None) -> str:
     return WIRE_TO_GEMINI_FINISH_REASON.get(wire_code, "FINISH_REASON_UNSPECIFIED")
 
 
+# HTTP 状态码 → Gemini 错误 status 字符串（HTTPException / RequestError 两处共用）
+_HTTP_STATUS_TO_GEMINI: dict[int, str] = {
+    400: "INVALID_ARGUMENT",
+    401: "UNAUTHENTICATED",
+    403: "PERMISSION_DENIED",
+    404: "NOT_FOUND",
+    429: "RESOURCE_EXHAUSTED",
+    500: "INTERNAL",
+    502: "UNAVAILABLE",
+    503: "UNAVAILABLE",
+    504: "DEADLINE_EXCEEDED",
+}
+
+
 def clean_upstream_error_message(raw_msg: str) -> str:
     """Extract a clean, readable error message from Google/JSPB upstream error strings."""
     if not raw_msg:
@@ -158,40 +172,22 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
         raw_msg = detail.get("message") if isinstance(detail, dict) else detail
         msg = str(raw_msg) if raw_msg is not None else ""
         clean_msg = clean_upstream_error_message(msg)
-        status_map = {
-            400: "INVALID_ARGUMENT",
-            401: "UNAUTHENTICATED",
-            403: "PERMISSION_DENIED",
-            404: "NOT_FOUND",
-            429: "RESOURCE_EXHAUSTED",
-            500: "INTERNAL",
-            502: "UNAVAILABLE",
-            503: "UNAVAILABLE",
-            504: "DEADLINE_EXCEEDED",
-        }
         return (
             status,
             clean_msg,
-            status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
+            _HTTP_STATUS_TO_GEMINI.get(
+                status, "INTERNAL" if status >= 500 else "UNKNOWN"
+            ),
         )
     if isinstance(exc, RequestError):
         status = exc.status if exc.status > 0 else 500
         clean_msg = clean_upstream_error_message(str(exc))
-        status_map = {
-            400: "INVALID_ARGUMENT",
-            401: "UNAUTHENTICATED",
-            403: "PERMISSION_DENIED",
-            404: "NOT_FOUND",
-            429: "RESOURCE_EXHAUSTED",
-            500: "INTERNAL",
-            502: "UNAVAILABLE",
-            503: "UNAVAILABLE",
-            504: "DEADLINE_EXCEEDED",
-        }
         return (
             status,
             clean_msg,
-            status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
+            _HTTP_STATUS_TO_GEMINI.get(
+                status, "INTERNAL" if status >= 500 else "UNKNOWN"
+            ),
         )
     if isinstance(exc, AistudioError):
         return 500, str(exc), "INTERNAL"
@@ -684,12 +680,19 @@ async def generate_content_output(
                 continue
             raise
 
+    # 循环走满 = 最后一次失败被判「可重试」但 attempts 已用尽（单浏览器路径的切号
+    # 分支没有 attempt 守卫）。按真实错误分类抛，别一律谎报成 429 配额耗尽。
+    if last_error is None or isinstance(last_error, UsageLimitExceeded):
+        raise HTTPException(
+            429,
+            detail={
+                "message": f"All accounts reached daily quota for model '{model_path}'. Quota resets at 00:00 PST.",
+                "type": "rate_limit_exceeded",
+            },
+        ) from last_error
+    code, message, _status = classify_gemini_error_payload(last_error)
     raise HTTPException(
-        429,
-        detail={
-            "message": f"All accounts reached daily quota for model '{model_path}'. Quota resets at 00:00 PST.",
-            "type": "rate_limit_exceeded",
-        },
+        code, detail={"message": message, "type": "upstream_error"}
     ) from last_error
 
 
@@ -863,6 +866,7 @@ async def stream_raw_events(
     ``client.stream_generate_content`` 的事件；重试耗尽仍失败时抛出最后的异常
     （由 Gemini SSE / OpenAI SSE 各自决定怎么把错误写给客户端）。
     """
+    last_stream_error: Exception | None = None
     for stream_attempt in range(MAX_RETRIES):
         has_yielded_data = False
         attempt_started = time.perf_counter()
@@ -895,6 +899,7 @@ async def stream_raw_events(
                 yield (event_type, text)
             return
         except Exception as exc:
+            last_stream_error = exc
             if await handle_attempt_exception(
                 exc,
                 attempt=stream_attempt,
@@ -906,6 +911,11 @@ async def stream_raw_events(
             ):
                 continue
             raise
+
+    # 循环走满 = 最后一次失败被判「可重试」但 attempts 已用尽。必须把错误抛出去
+    # （消费方渲染成流内错误帧），否则客户端只会看到一条静默的空流。
+    if last_stream_error is not None:
+        raise last_stream_error
 
 
 def _build_gemini_streaming_response(

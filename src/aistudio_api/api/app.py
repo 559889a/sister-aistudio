@@ -46,7 +46,7 @@ logger = get_logger("server")
 async def lifespan(_app: FastAPI):
     from aistudio_api.application.account_rotator import init_rotator
     from aistudio_api.application.account_service import AccountService
-    from aistudio_api.config import settings
+    from aistudio_api.config import clamp_pool_size, settings
     from aistudio_api.infrastructure.account.account_store import AccountStore
     from aistudio_api.infrastructure.browser.browser_engine import (
         install_process_cleanup_handlers,
@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
 
     # 浏览器 worker 池：pool_size>1 时用 ClientPool（多台 Chromium 负载均衡 + 失败自愈），
     # =1 时保持原来的单浏览器路径（现有测试与兼容性都靠它）。
-    pool_size = max(1, min(4, int(settings.browser_pool_size)))
+    pool_size = clamp_pool_size(settings.browser_pool_size)
     client: object
     if pool_size > 1:
         from aistudio_api.infrastructure.gateway.client_pool import ClientPool

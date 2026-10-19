@@ -566,7 +566,6 @@ class AccountRotator:
                     for a, _ in candidates:
                         if a.id == current_account_id:
                             return a
-                # 故障转移：按最少 auth_errors、最少 errors、最久未用挑选
                 # 故障转移：优先用该模型与总使用次数少、非 drip_mode 的充沛额度健康账号
                 norm_m = normalize_model_key(model)
                 account, _ = min(
@@ -591,57 +590,6 @@ class AccountRotator:
                         return a
 
             return available[0][0]
-
-    async def get_next_account_with_stats(
-        self,
-        model: str | None = None,
-        current_account_id: str | None = None,
-        failed_account_id: str | None = None,
-        *,
-        is_session_expired: bool = False,
-    ) -> tuple[AccountMeta, AccountStats] | None:
-        """获取下一个可用账号及其统计。"""
-        async with self._lock:
-            available = self._get_available_accounts(model)
-            if not available:
-                available = self._get_available_accounts(
-                    model, ignore_auth_cooldown=True
-                )
-                if not available:
-                    return None
-
-            candidates = [
-                (a, s)
-                for a, s in available
-                if not (failed_account_id and a.id == failed_account_id)
-            ]
-            if candidates:
-                if current_account_id and not (
-                    failed_account_id and current_account_id == failed_account_id
-                ):
-                    for a, s in candidates:
-                        if a.id == current_account_id:
-                            return a, s
-                norm_m = normalize_model_key(model)
-                return min(
-                    candidates,
-                    key=lambda x: (
-                        1 if (norm_m and x[1].model_drip_mode.get(norm_m)) else 0,
-                        x[1].model_requests.get(norm_m, 0) if norm_m else 0,
-                        x[1].requests,
-                        x[1].auth_errors,
-                        x[1].errors,
-                        x[1].last_used,
-                    ),
-                )
-            if is_session_expired:
-                return None
-            if failed_account_id:
-                for a, s in available:
-                    if a.id == failed_account_id:
-                        return a, s
-
-            return available[0]
 
     def record_success(self, account_id: str, model: str | None = None) -> None:
         if account_id not in self._stats:
