@@ -173,7 +173,7 @@ uv run python3 main.py server --port 8080
 | **Python 代码风格与 Lint** | `uv run ruff check .` | 0 errors |
 | **Python 代码格式化** | `uv run ruff format --check .` | 72 files already formatted |
 | **Python 类型检查** | `bun x pyright src tests` | 0 errors |
-| **Python 单元测试** | `uv run pytest` | 全部通过（Windows 本地基线：**555 passed / 8 failed**，8 条都是既有的环境类失败：`test_browser_engine`×2、`test_browser_scripts_syntax`×1、`test_response_parser`×3、`test_wire_codec`×2；CI Linux 上不存在） |
+| **Python 单元测试** | `uv run pytest` | 全部通过（Windows 本地基线：**560 passed / 8 failed**，8 条都是既有的环境类失败：`test_browser_engine`×2、`test_browser_scripts_syntax`×1、`test_response_parser`×3、`test_wire_codec`×2；CI Linux 上不存在） |
 | **浏览器 JS 语法校验** | `for f in src/aistudio_api/infrastructure/browser/js/*.js; do bun build "$f" --no-bundle >/dev/null; done` | 0 errors |
 | **前端代码规范** | `cd web && bun run lint` | 0 errors, 0 warnings |
 | **前端类型检查** | `cd web && bun run type-check` | 0 errors |
@@ -289,7 +289,7 @@ aistudio-api/
 SessionExpired 隔离 24h、`start.cmd` 前台 Ctrl+C、终端 LLM 日志、streaming JSON 修复、
 OpenAI 兼容端口、bypass/预填充/签名哨兵。
 
-### 6.2 关键真机证据（复现步骤在 6.5 的脚本里）
+### 6.2 关键真机证据（复现方法见 6.5）
 
 1. **bypass 请求是整段返回，不是网关攒包**（隔离探针，独立浏览器 + 独立 data dir）：
    - bypass **开**：`status=200` 与首个 body 都在 **7.08s**，正文 **1 块 438 字**，总 7.11s；
@@ -322,24 +322,24 @@ OpenAI 兼容端口、bypass/预填充/签名哨兵。
    没等到真实上游 403 现场。遇到时留意日志里的 `worker #N 故障 (auth/http_403…)`。
 7. **全量 pytest 的 8 条 Windows 既有失败**（`test_browser_engine`×2、`test_browser_scripts_syntax`×1、
    `test_response_parser`×3、`test_wire_codec`×2）是环境/基线问题，不是回归；别去「修」成通过。
-8. **未提交 git**：工作区有 100+ 文件改动（含新增文件）。交接前如要提交，先 `git status` 对照
-   `C:\sister-aistudio-local\sister-aistudio-port.patch`；补丁生成方式见 6.5。
-9. 本轮最后两个改动（standby 判定、stall 文案）只跑了定向测试与 ruff；**全量 pytest 请在交接前再跑一次**
-   （见 6.4 命令），结果应是 555 passed / 8 failed。
+8. **仓库状态**：所有改动已提交并推送到 `origin`（`559889a/sister-aistudio`，2026-10-20）。
+   不要再生成/依赖补丁文件；要看差异直接 `git diff upstream/master..origin/master`。
+9. 本轮最后两个改动（standby 判定、stall 文案）已跑定向测试与 ruff；**全量 pytest 请在交接前再跑一次**
+   （见 6.4 命令），结果应是 560 passed / 8 failed。
 
 ### 6.4 环境、命令与坑
 
 ```powershell
-# 项目根（不是 git clone 的 local 目录）
+# 项目根（唯一副本；没有别的 clone/venv 目录）
 cd C:\sister-aistudio
 $env:PYTHONPATH = 'C:\sister-aistudio\src'
 $env:PYTHONIOENCODING = 'utf-8'
 
-# 全量测试（Windows 基线：555 passed / 8 failed）
-& 'C:\sister-aistudio-local\venv\Scripts\python.exe' -m pytest tests -q
+# 全量测试（Windows 基线：560 passed / 8 failed）
+& 'C:\sister-aistudio\.venv\Scripts\python.exe' -m pytest tests -q
 
 # ruff
-& 'C:\sister-aistudio-local\venv\Scripts\ruff.exe' check src tests
+& 'C:\sister-aistudio\.venv\Scripts\ruff.exe' check src tests
 
 # JS 语法
 node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
@@ -348,6 +348,9 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 .\start.cmd
 ```
 
+- `.venv` 是项目自己的虚拟环境（Python 3.14，`uv` 创建；`start.cmd` 用的就是它）。测试依赖
+  `pytest` / `pytest-asyncio` / `ruff` / `google-genai` 已装好；缺东西就
+  `uv pip install --python .venv\Scripts\python.exe <pkg>`。
 - 运行期数据：`data/settings.json`（WebUI/`PUT /settings`，立即生效）、`data/accounts/<id>/auth.json`、
   `data/accounts/<id>/profile-wN`（worker profile，**同一 auth_file 不许共用**）。
 - 池默认 2 台：CDP `9222/9223`；**不要在服务运行时再起第二个网关碰这两个端口**。做隔离实验时用
@@ -355,21 +358,21 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 - 主项目 `C:\build2api` 在 **8889** 跑着（用户自己的），**不要动它**；只读对比其
   `/__b2a/requests`（`Authorization: Bearer sk-123`）可以看到同通道的真实首包/总时长。
 - 额度：`gemini-4-argon` 日桶很小，**别拿它压测**；诊断用 `gemini-3.8-flash`。
-- 补丁：`git add -N` 未跟踪文件 → `git diff --binary --output=C:\sister-aistudio-local\sister-aistudio-port.patch`
-  → `git reset`；再用 `git clone --no-hardlinks` 到临时目录 `git apply --check` 验证后删掉 clone。
 - **改完代码要重启 `start.cmd` 才生效**：用户 2026-10-20 05:5x 时 8080 上还跑着改前的进程；
   停服务只按用户的方式（Ctrl+C），别去 kill 进程号或动 9222/9223 的 Chromium。
 
-### 6.5 诊断脚本（`C:\sister-aistudio-local`，都是这一次排查留下的）
+### 6.5 诊断脚本（已随临时目录删除）
 
-| 脚本 | 用途 |
+排查时用的是项目外的临时目录 `C:\sister-aistudio-local`（agent 工作台：3.12 测试 venv + 一次性脚本 +
+日志 + 补丁），**2026-10-20 已整体删除**；项目里现在只有 `C:\sister-aistudio` 一个目录，测试统一用
+项目 `.venv`。要复现当时的实验，按 6.2 的结论重写等价脚本即可，关键做法：
+
+| 实验 | 做法 |
 |---|---|
-| `diag_binding.py` | 冷/热 profile 下页面 DI 探针状态（`dms/TB/tap/service` 时间线），只起浏览器不发请求 |
-| `diag_binding3.py` | 证明「通用 `inject()` 形状捕获能拿到服务并签 proof」 |
-| `diag_bootstrap_after_fix.py` | 端到端跑 `bootstrap_botguard_and_template`，验证 binding 修复（4.2s / 300KB binding 0.68s） |
-| `probe_flash_stream.py` / `probe_flash_long.py` | 通过运行中的网关打 flash 流式请求，打印每帧到达时间（产物 `probe_*.sse`） |
-| `probe_isolation.py` | **最关键的对照实验**：独立浏览器 + 临时 data dir，bypass 开/关各打一发，比较 status/chunk 时间线（产物 `probe_isolation.log`） |
-| `curl_trace.log` / `curl_out.sse` | 用户要求的那发 raw curl 的逐块时间戳与原始 SSE |
+| 页面 DI 探针状态 | 起一台隔离浏览器（独立 `AISTUDIO_DATA_DIR` + `AISTUDIO_BROWSER_PORT=95xx`），装 document-start hooks 后每秒读 `window.__AISTUDIO__` 的 `service/captureVia/snapKey`，只读不发请求 |
+| bypass 开/关对照 | 同一隔离实例里，用 `client.stream_generate_content` 直接打一发 flash；bypass 开时 `status` 与正文同时到、正文 1 块；关掉后 19 块 / 0.3s 间隔 |
+| 网关 SSE 逐块计时 | `curl.exe -N --trace-time --trace-ascii <log>` 打运行中的 `/v1/chat/completions`，看心跳与正文到齐的时间 |
+| 300KB binding 是否冻页面 | 页面里原生 setter 写 300KB 进 `ms-prompt-box textarea`，随后每 250ms 测一次 `Runtime.evaluate` 往返；实测 RTT 3~65ms，无冻结 |
 
 ### 6.6 一句话结论（可以直接转述给用户）
 

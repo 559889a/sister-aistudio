@@ -550,8 +550,9 @@ uv run pytest
 ```
 
 > [!NOTE]
-> Windows 本地基线是 **555 passed / 8 failed**（8 条都是环境类既有失败，CI Linux 上不存在，
+> Windows 本地基线是 **560 passed / 8 failed**（8 条都是环境类既有失败，CI Linux 上不存在，
 > 明细见 `AGENT.md` §3.4）。交接状态、未解决问题、真机证据与诊断脚本见 **`AGENT.md` §6**；
+> 项目里只有一个目录 `C:\sister-aistudio`，测试用项目 `.venv`（`pytest`/`ruff` 已装）；
 > 改完代码记得重启服务才生效。
 
 Android 伴侣端代码质量检查：
