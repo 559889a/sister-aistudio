@@ -58,9 +58,9 @@ logger = get_logger("api.gemini")
 # 的窗口（实测三次重试把一次请求拖到 800+ 秒），所以直接 502 让客户端看到失败。
 _BROWSER_TRANSPORT_RETRY_MAX_S = 20.0
 
-# 上游一直不给我们任何事件（连响应头都没有）时，每这么久打一条 WARN。
-# 它不是看门狗：只报告「现在卡在等上游」，不会中止请求。
-_STALL_WARN_S = 60.0
+# 周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20）：bypass 请求
+# 动辄几百秒整段返回，这条 WARN 只会刷屏。静默期只有 1s 心跳；完成后日志里的
+# 「首包 X s / 总 Y s」才是判据，失败时另有 CDP 网络层证据。
 
 
 def _fmt_elapsed(attempt_elapsed_s: float | None) -> str:
@@ -919,8 +919,6 @@ def _build_gemini_streaming_response(
         started = time.perf_counter()
         bytes_out = 0
         attempt = 1
-        last_upstream_event = time.perf_counter()
-        last_stall_log = 0.0
         headers_at: float | None = None
         first_event_at: float | None = None
         completed = False
@@ -934,29 +932,9 @@ def _build_gemini_streaming_response(
             ):
                 now = time.perf_counter()
                 if event_type == HEARTBEAT_EVENT:
-                    silent_s = now - last_upstream_event
-                    if (
-                        silent_s >= _STALL_WARN_S
-                        and (now - last_stall_log) >= _STALL_WARN_S
-                    ):
-                        last_stall_log = now
-                        where = (
-                            "响应头都没收到"
-                            if headers_at is None
-                            else "已收到响应头但一直没有正文"
-                        )
-                        logger.warning(
-                            "%s上游 %.0fs 无任何数据（%s，尝试 %d，已发 %dB）",
-                            _rid(),
-                            silent_s,
-                            where,
-                            attempt,
-                            bytes_out,
-                        )
                     # 原生 Gemini 路由没有安全的空 data 帧形状：发 SSE 注释行（规范要求忽略）
                     yield ": ping\n\n"
                     continue
-                last_upstream_event = now
                 if event_type == "status":
                     headers_at = now - started
                     if first_event_at is None:

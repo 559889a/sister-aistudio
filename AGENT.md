@@ -31,7 +31,7 @@
 - **页面 fetch/XHR 的网络失败是 `BrowserTransportError`，不是 500**：`transport.py` 把 `Failed to fetch`、页面关闭、CDP 命令超时统一抛这个类型；`handle_attempt_exception` 在**还没吐任何正文**时清模板缓存原地重试（页面不可用则重建会话），已吐数据或重试耗尽报 502 `UNAVAILABLE`。别退回「未知严重异常 → 500」，也**不要**因为传输失败去切换账号——账号本身没坏。
 - **浏览器 worker 池：worker 隔离、单请求绑定、失败切另一台（别退回单浏览器语义）**：`AISTUDIO_BROWSER_POOL_SIZE>1` 时由 `infrastructure/gateway/client_pool.py` 管 N 台 Chromium——第 N 台 CDP 端口 = `browser_port+N`、profile 目录按 `-wN` 后缀隔离（同一 auth_file 也不许共用目录）；一个请求由 `pick()` 绑定到一台 worker（ContextVar `current_worker/current_account_id`），**中途不换 worker**。403/401、5xx、502、页面传输失败都按 **worker 故障**处理：后台 kill+重启那台，未吐字节时本次请求立刻切另一台重试；这些错误**不给账号加冷却**（只有 429 保留配额冷却、SessionExpiredError 才按账号隔离）。单浏览器路径（`pool_size=1`）保持旧行为，两种模式别混用判据。
 - **失败切换的「备用」包含空闲休眠（STOPPED）worker**：`_standby_worker()` 认 `READY` + `STOPPED`（`pick()` 会把它重新拉起，20~40s），日志写 `切备用=#N（空闲休眠，将拉起）`。**别改回只认 READY**：2026-10-20 现场就是另一台空闲 30 分钟被回收，8 分钟长请求失败时日志写「切备用=否」、请求直接 502 —— 其实那台可以拉起来再战。
-- **bypass 请求的上游是「整段返回」，不是网关丢事件**：bypass 会注入合成 functionCall，Gemini 不分片下发函数参数，**上游第一帧就是整段工具调用**，在此之前连 HTTP 响应头都不到。所以流式日志里的 `上游 Ns 无任何数据（响应头都没收到…）` 在 bypass 下是**预期**（已自动附说明）；`已发 N B` 全是 1s 心跳帧、正文 0 字节。**不要因此加看门狗、提前 502、或伪造分块**——普通请求（bypass 关）在同一通道实测是逐块流式的（19 块 / 0.3s），可以拿它区分「通道坏了」还是「bypass 整段返回」。
+- **bypass 请求的上游是「整段返回」，不是网关丢事件**：bypass 会注入合成 functionCall，Gemini 不分片下发函数参数，**上游第一帧就是整段工具调用**，在此之前连 HTTP 响应头都不到（2026-10-20 真机复测：bypass 开 首包 5.4s/总 5.5s、正文 1 块；bypass 关 首包 3.1s/总 7.8s、19 块逐块到达）。**周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20，几百秒的请求只会刷屏）——不要加回来**；判据是完成日志的「首包 X s / 总 Y s」，失败归因靠 CDP 网络层证据 WARN。**也不要因此加看门狗、提前 502、或伪造分块**。
 - Flake：页面 `fetch` 在长等待后抛 `Failed to fetch` 是真实的网络/上游断开（`BrowserTransportError`），不是本项目的 abort（`abort_stream` 目前没有任何调用点）；按 worker 故障重启 + 有备用就切，没备用才 502。主项目（`C:\build2api`）同通道记录里也有一次 183s 的 `Failed to fetch`。
 - **架构事实优先（Fact & Architecture over Brittle Tests）**：保持架构整洁与低耦合。避免为了迁就耦合了私有变量的脆弱 mock 测试而妥协生产设计；遇冲突时应重构测试以对齐公共接口契约，消除抽象泄露。
 - **协议索引常量化（Specification Constants & No Magic Numbers）**：Protobuf-over-JSON 逆向数组索引统一提取为具备明确语义的规范枚举或常量（如 `wire_spec.py`），杜绝裸数字散落业务逻辑中。
@@ -281,7 +281,7 @@ aistudio-api/
 | binding 引导不再依赖 `dms.TB`：包 `default_MakerSuite.n`，按形状（`service.A.snapshot` 是函数）接服务 | `infrastructure/browser/js/install_hooks.js` | 空 profile 真机 binding 引导 **4.2s**（`capture_via=inject(shape)`） |
 | 连续 3 次 `service_unavailable` 提前回退 page_send（`SERVICE_UNAVAILABLE_BAIL`），不再白等 35s × worker 数 | `infrastructure/gateway/botguard_bootstrap.py` | 新增单测；日志「binding 探针连续 3 次…提前回退」 |
 | 备用 worker 判定包含空闲休眠（STOPPED）：`_standby_worker()`，日志写 `切备用=#N（空闲休眠，将拉起）` | `infrastructure/gateway/client_pool.py` | 新增单测 `test_standby_includes_idle_reclaimed_worker` |
-| 长静默 WARN 带 request id；bypass 时附「整段返回属预期」说明 | `api/routes_openai.py`、`api/routes_gemini.py`（gemini 原本已带 rid） | 定向单测 + real curl |
+| 长静默 WARN 带 request id；bypass 时附「整段返回属预期」说明 | ~~`api/routes_openai.py`、`api/service_gemini.py`~~ **已于 2026-10-20 第三轮按用户要求移除**（几百秒请求刷屏）；判据改为完成日志「首包/总时长」 | real curl 复测（bypass 开 5.4s/5.5s 1 块；关 3.1s/7.8s 19 块） |
 | **（第二轮）auth.json / meta.json 原子写**：`save_browser_cookies` 与身份探测回写全改 `atomic_write_json`，两台 worker 共用账号时不再可能读到半截 JSON | `infrastructure/gateway/session_auth.py` | 定向测试通过（改动机械） |
 | **（第二轮）池模式账号重绑**：`ClientPool.activate_account` / `redistribute_accounts`；WebUI 手动切换/删除/probe-import 同步所有 worker | `infrastructure/gateway/client_pool.py`、`api/routes_accounts.py` | 新增单测 ×5（池重绑 / 未知账号 / 删除重排 / 路由 pool 分支 ×2） |
 | **（第二轮）传输失败网络层证据**：`$rpc/` 请求记 `loadingFailed`（errorText/canceled/blocked/resp），`Failed to fetch` 时 WARN 归因 | `infrastructure/gateway/transport.py`、`infrastructure/browser/cdp_client.py` | 新增单测 `test_replay_failure_logs_cdp_net_layer_evidence` |
@@ -316,9 +316,11 @@ OpenAI 兼容端口、bypass/预填充/签名哨兵。
    **等下一次真实复现看这行日志即可归因**（ERR_CONNECTION_RESET/EMPTY_RESPONSE=上游断；
    canceled=true=页面 JS 自己中止=我方代码问题）；不要再起隔离实例压测 argon。无记录本身也是线索
    （= 页面 JS 层中止）。
-2. **bypass 长请求要不要给客户端「正在生成」信号**：现在只有 1s 心跳；用户接受「和非流式差不多」，
-   但超大上下文动辄几分钟，客户端体验差。选项：SSE 里发一个非标准 `processing` 事件、
-   或文档里明确告诉客户端「bypass 请求首包=整段生成时间」。**用户尚未拍板，别擅自加**。
+2. ~~bypass 长请求要不要给客户端「正在生成」信号~~ **用户已拍板（2026-10-20）：不加，维持只有
+   1s 心跳**（原话「那就等着」）。同时按用户要求删除了周期性「上游 Ns 无任何数据」WARN
+   （`routes_openai.py` / `api_service_gemini.py`，理由：单请求可能连跑几百秒，WARN 只会刷屏）。
+   bypass 期间**原理上无法**区分「正在生成」与「无响应」：上游完成前 0 字节（连响应头都不来，
+   已实测），网关侧任何「进度」信号都只能是自造的非标准事件。
 3. **超长请求失败后的重试窗口**：备用 worker 空闲休眠时需要 20~40s 拉起，再重新生成可能又是几分钟；
    是否对「已经等了 N 分钟且无首帧」的 transport 失败改为快速失败（而不是切备用重试），待用户决定。
 4. ~~单账号时两台 worker 共用 cookie~~ **已修（2026-10-20 第二轮）**：`save_browser_cookies` 与
@@ -391,7 +393,8 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 
 - `binding 引导未通过…回退 page_send` = **真 bug（已修）**：新页面构建不再导出 `dms.TB`，DI 探针装不上。
 - `上游 Ns 无任何数据（响应头都没收到）` = **不是 bug**：bypass 的 functionCall 上游整段返回，
-  出第一帧前没有任何字节（也就没有响应头）；心跳一直在发，60s WARN 只是报告卡点。
+  出第一帧前没有任何字节（也就没有响应头）；心跳一直在发。这条周期 WARN 已按用户要求移除
+  （2026-10-20），别加回来；判据用完成日志的「首包 X s / 总 Y s」。
 - `Failed to fetch` → 502 = **不是误判**：页面 fetch 真的被上游/网络断开（主项目同通道也有），
   但有备用却没切是 **真误判（已修：空闲休眠也算备用）**。现在失败时还会跟一条
   `CDP 网络层证据 … err=net::ERR_xxx` 的 WARN，下次复现直接拿它归因。

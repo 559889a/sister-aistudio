@@ -37,7 +37,6 @@ from aistudio_api.application.openai_bridge import (
     to_openai_model_list,
     to_openai_response,
 )
-from aistudio_api.application.runtime_settings import bypass_enabled
 from aistudio_api.application.stream_heartbeat import (
     HEARTBEAT_EVENT,
     stream_with_heartbeat,
@@ -56,10 +55,9 @@ logger = get_logger("routes.openai")
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-
-# 上游一直不给我们任何事件（连响应头都没有）时，每这么久打一条 WARN。
-# 它不是看门狗：只报告「现在卡在等上游」，不会中止请求。
-_STALL_WARN_S = 60.0
+# 周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20）：bypass 请求
+# 动辄几百秒整段返回，这条 WARN 只会刷屏。静默期只有 1s 心跳；完成后日志里的
+# 「首包 X s / 总 Y s」才是判据，失败时另有 CDP 网络层证据。
 
 
 def _new_request_id() -> str:
@@ -171,8 +169,6 @@ async def _stream_openai_chunks(
     converter: OpenAIStreamConverter | None = None
     attempt = 1
     bytes_out = 0
-    last_upstream_event = time.perf_counter()
-    last_stall_log = 0.0
     headers_at: float | None = None
     first_event_at: float | None = None
     completed = False
@@ -182,30 +178,10 @@ async def _stream_openai_chunks(
         ):
             now = time.perf_counter()
             if event_type == HEARTBEAT_EVENT:
-                silent_s = now - last_upstream_event
-                if silent_s >= _STALL_WARN_S and (now - last_stall_log) >= _STALL_WARN_S:
-                    last_stall_log = now
-                    if headers_at is None:
-                        where = "响应头都没收到"
-                        if bypass_enabled():
-                            # bypass 走合成 functionCall：上游不分片下发参数，
-                            # 第一帧就是整段工具调用，出帧之前连响应头都没有。
-                            where += "（bypass 函数调用整段返回，出首帧前无数据属预期）"
-                    else:
-                        where = "已收到响应头但一直没有正文"
-                    logger.warning(
-                        "%s上游 %.0fs 无任何数据（%s，尝试 %d，已发 %dB）",
-                        request_id,
-                        silent_s,
-                        where,
-                        attempt,
-                        bytes_out,
-                    )
                 frame = format_sse(_heartbeat_frame(payload.model, request_id))
                 bytes_out += len(frame)
                 yield frame
                 continue
-            last_upstream_event = now
             if event_type == "status":
                 headers_at = now - started
                 if first_event_at is None:
