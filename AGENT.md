@@ -173,7 +173,7 @@ uv run python3 main.py server --port 8080
 | **Python 代码风格与 Lint** | `uv run ruff check .` | 0 errors |
 | **Python 代码格式化** | `uv run ruff format --check .` | 72 files already formatted |
 | **Python 类型检查** | `bun x pyright src tests` | 0 errors |
-| **Python 单元测试** | `uv run pytest` | 全部通过（Windows 本地基线：**560 passed / 8 failed**，8 条都是既有的环境类失败：`test_browser_engine`×2、`test_browser_scripts_syntax`×1、`test_response_parser`×3、`test_wire_codec`×2；CI Linux 上不存在） |
+| **Python 单元测试** | `uv run pytest` | 全部通过（Windows 本地基线：**567 passed / 7 failed**，均为既有的环境类失败：`test_browser_engine`×1~2（随环境闪动）、`test_browser_scripts_syntax`×1、`test_response_parser`×3、`test_wire_codec`×2；CI Linux 上不存在） |
 | **浏览器 JS 语法校验** | `for f in src/aistudio_api/infrastructure/browser/js/*.js; do bun build "$f" --no-bundle >/dev/null; done` | 0 errors |
 | **前端代码规范** | `cd web && bun run lint` | 0 errors, 0 warnings |
 | **前端类型检查** | `cd web && bun run type-check` | 0 errors |
@@ -282,6 +282,9 @@ aistudio-api/
 | 连续 3 次 `service_unavailable` 提前回退 page_send（`SERVICE_UNAVAILABLE_BAIL`），不再白等 35s × worker 数 | `infrastructure/gateway/botguard_bootstrap.py` | 新增单测；日志「binding 探针连续 3 次…提前回退」 |
 | 备用 worker 判定包含空闲休眠（STOPPED）：`_standby_worker()`，日志写 `切备用=#N（空闲休眠，将拉起）` | `infrastructure/gateway/client_pool.py` | 新增单测 `test_standby_includes_idle_reclaimed_worker` |
 | 长静默 WARN 带 request id；bypass 时附「整段返回属预期」说明 | `api/routes_openai.py`、`api/routes_gemini.py`（gemini 原本已带 rid） | 定向单测 + real curl |
+| **（第二轮）auth.json / meta.json 原子写**：`save_browser_cookies` 与身份探测回写全改 `atomic_write_json`，两台 worker 共用账号时不再可能读到半截 JSON | `infrastructure/gateway/session_auth.py` | 定向测试通过（改动机械） |
+| **（第二轮）池模式账号重绑**：`ClientPool.activate_account` / `redistribute_accounts`；WebUI 手动切换/删除/probe-import 同步所有 worker | `infrastructure/gateway/client_pool.py`、`api/routes_accounts.py` | 新增单测 ×5（池重绑 / 未知账号 / 删除重排 / 路由 pool 分支 ×2） |
+| **（第二轮）传输失败网络层证据**：`$rpc/` 请求记 `loadingFailed`（errorText/canceled/blocked/resp），`Failed to fetch` 时 WARN 归因 | `infrastructure/gateway/transport.py`、`infrastructure/browser/cdp_client.py` | 新增单测 `test_replay_failure_logs_cdp_net_layer_evidence` |
 | 文档：binding 新构建、bypass 整段返回、池 standby 语义 | `README.md`、`AGENT.md`、`docs/BOTGUARD_VERIFICATION_CHAIN.md` | — |
 
 上一轮（同一会话）已完成、本轮继续有效：2 台 worker 池（9222/9223，`-w0`/`-w1`）、
@@ -306,26 +309,36 @@ OpenAI 兼容端口、bypass/预填充/签名哨兵。
 ### 6.3 未解决 / 需要下一个 agent 决定的事
 
 1. **`Failed to fetch` 在长请求（数百秒）后的根因未定**：是 Google 前置/代理/Chrome 在长时间
-   无字节时断连，还是 BotGuard proof 时效，尚未证明。复现时建议：给页面 CDP 挂
-   `Network.requestWillBeSent` / `Network.responseReceived` / `loadingFailed` 打时间戳（**只在隔离实例上做，
-   别碰用户正在跑的 9222/9223**），对比「连接何时被谁断」。**不要**用加看门狗的办法绕。
+   无字节时断连，还是 BotGuard proof 时效，尚未证明。**已埋好证据采集（2026-10-20 第二轮）**：
+   `transport.py` 的 `_ensure_net_trace` 给每个页面订阅 `Network.requestWillBeSent` / `responseReceived` /
+   `loadingFailed`（只记 `$rpc/` 请求，监听在 `init_domains` 的 `Network.enable` 上，零额外开销），
+   传输失败时 `_log_rpc_net_evidence` 打 WARN：`err=net::ERR_xxx canceled=… blocked=… resp=none|200 age=…`。
+   **等下一次真实复现看这行日志即可归因**（ERR_CONNECTION_RESET/EMPTY_RESPONSE=上游断；
+   canceled=true=页面 JS 自己中止=我方代码问题）；不要再起隔离实例压测 argon。无记录本身也是线索
+   （= 页面 JS 层中止）。
 2. **bypass 长请求要不要给客户端「正在生成」信号**：现在只有 1s 心跳；用户接受「和非流式差不多」，
    但超大上下文动辄几分钟，客户端体验差。选项：SSE 里发一个非标准 `processing` 事件、
    或文档里明确告诉客户端「bypass 请求首包=整段生成时间」。**用户尚未拍板，别擅自加**。
 3. **超长请求失败后的重试窗口**：备用 worker 空闲休眠时需要 20~40s 拉起，再重新生成可能又是几分钟；
    是否对「已经等了 N 分钟且无首帧」的 transport 失败改为快速失败（而不是切备用重试），待用户决定。
-4. **单账号时两台 worker 共用 cookie**：`save_browser_cookies` 两台都会写同一份 `auth.json`
-   （原子写，不会写坏，但可能后写覆盖先写）。目前只有 1~2 个账号，等导入 4+ 份后自然分散；
-   若单账号长期跑，考虑给 cookie 保存加跨 worker 互斥或只让主 worker 保存。
-5. **WebUI 手动「切换账号」只影响当前/主 worker**，不会同步两台；多账号导入后需要补「按账号重绑 worker」。
+4. ~~单账号时两台 worker 共用 cookie~~ **已修（2026-10-20 第二轮）**：`save_browser_cookies` 与
+   `verify_account_identity` 的 meta.json 写入原来**并不是**原子写（交接文档说错了）——直接
+   `write_text` 会让另一台 worker / 传输层兜底读到半截 JSON 误判 Cookie 失效。现全部改走
+   `atomic_write_json`（temp+os.replace）。后写覆盖先写仍是预期行为（两台都是活会话），接受。
+5. ~~WebUI 手动「切换账号」只影响主 worker~~ **已修（2026-10-20 第二轮）**：`ClientPool.activate_account`
+   重绑**所有** worker（READY 蓝绿热切、休眠的改绑定待拉起）；删除账号走 `redistribute_accounts`
+   把仍指向已删账号的 worker 换到剩余账号；`probe-import` 首个账号激活同样走池。
+   绑定是手动的、不自动回落；`detect-email` 的浏览器兜底切号在池模式直接跳过（HTTP 探测已覆盖）。
 6. **真实上游 403/500/502 自愈**只做过单测 + 真机 kill Chromium 冒烟（同请求切备用 200）；
    没等到真实上游 403 现场。遇到时留意日志里的 `worker #N 故障 (auth/http_403…)`。
-7. **全量 pytest 的 8 条 Windows 既有失败**（`test_browser_engine`×2、`test_browser_scripts_syntax`×1、
-   `test_response_parser`×3、`test_wire_codec`×2）是环境/基线问题，不是回归；别去「修」成通过。
-8. **仓库状态**：所有改动已提交并推送到 `origin`（`559889a/sister-aistudio`，2026-10-20）。
+7. **全量 pytest 的 Windows 既有失败**（`test_browser_engine`、`test_browser_scripts_syntax`×1、
+   `test_response_parser`×3、`test_wire_codec`×2）是环境/基线问题，不是回归；别去「修」成通过
+   （browser_engine 有一条会随环境状态闪通/闪挂，2026-10-20 第二轮为 1 failed 而非 2）。
+8. **仓库状态**：改动已提交并推送到 `origin`（`559889a/sister-aistudio`）。
    不要再生成/依赖补丁文件；要看差异直接 `git diff upstream/master..origin/master`。
-9. 本轮最后两个改动（standby 判定、stall 文案）已跑定向测试与 ruff；**全量 pytest 请在交接前再跑一次**
-   （见 6.4 命令），结果应是 560 passed / 8 failed。
+9. 全量 pytest（2026-10-20 第二轮，含本轮 6 条新测试）：**567 passed / 7 failed**（7 条全是
+   §6.3.7 的环境类既有失败）；`ruff check src tests` 0 errors；pyright 与改前基线持平
+   （本机 86 条既有 errors，本轮 0 新增）。
 
 ### 6.4 环境、命令与坑
 
@@ -380,4 +393,8 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 - `上游 Ns 无任何数据（响应头都没收到）` = **不是 bug**：bypass 的 functionCall 上游整段返回，
   出第一帧前没有任何字节（也就没有响应头）；心跳一直在发，60s WARN 只是报告卡点。
 - `Failed to fetch` → 502 = **不是误判**：页面 fetch 真的被上游/网络断开（主项目同通道也有），
-  但有备用却没切是 **真误判（已修：空闲休眠也算备用）**。
+  但有备用却没切是 **真误判（已修：空闲休眠也算备用）**。现在失败时还会跟一条
+  `CDP 网络层证据 … err=net::ERR_xxx` 的 WARN，下次复现直接拿它归因。
+- WebUI 手动切号后「一半请求还在旧账号」= **真 bug（已修，2026-10-20 第二轮）**：池模式现在
+  `activate_account` 重绑所有 worker；之前只切主 worker。
+- auth.json 偶发读成半截 JSON → 误判 Cookie 失效 = **真隐患（已修）**：cookie/meta 回写改成原子替换了。

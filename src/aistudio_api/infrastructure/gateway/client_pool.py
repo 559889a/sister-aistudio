@@ -498,6 +498,71 @@ class ClientPool:
         if tasks:
             await asyncio.wait(tasks, timeout=timeout_s)
 
+    # ---------- 手动账号重绑（WebUI 切换 / 导入 / 删除后同步所有 worker） ----------
+    def _worker_auth_path(self, account_id: str) -> str | None:
+        try:
+            path = self.store.get_auth_path(account_id)
+        except Exception:
+            return None
+        return str(path) if path is not None else None
+
+    async def _rebind_worker(self, worker: Any, account_id: str) -> bool:
+        """把一台 worker 换到指定账号：READY 蓝绿热切（在途流式不中断），休眠的只改绑定。"""
+        path = self._worker_auth_path(account_id)
+        worker.account_id = account_id
+        ok = True
+        session = getattr(worker.client, "session", None)
+        if session is not None and path is not None:
+            if worker.state == WorkerState.READY:
+                try:
+                    await session.switch_auth(path)
+                except Exception as exc:
+                    logger.warning(
+                        "pool: worker #%d 热切账号 %s 失败: %s",
+                        worker.index,
+                        account_id,
+                        exc,
+                    )
+                    ok = False
+            else:
+                # 休眠/冷却的：下次 start() 的 _apply_account() 会用新账号拉起
+                session.set_account(path)
+        with suppress(Exception):
+            worker.client.clear_templates()
+        return ok
+
+    async def activate_account(self, account_id: str) -> bool:
+        """WebUI/导入后的手动激活：**所有** worker 重绑到该账号。
+
+        之前只切主 worker，另一台还挂在旧账号上继续接请求（rotator 归因错乱）。
+        绑定是手动的、不会自动回落；重新分配要再手动激活或重启服务。
+        """
+        if self._worker_auth_path(account_id) is None:
+            return False
+        ok = True
+        for worker in self._workers:
+            ok = await self._rebind_worker(worker, account_id) and ok
+        logger.info(
+            "pool: 手动激活账号 %s，已重绑 %d 台 worker", account_id, len(self._workers)
+        )
+        return ok
+
+    async def redistribute_accounts(self) -> None:
+        """账号删除后：仍指向已删账号的 worker 重绑到剩余账号（i%n 轮询）。"""
+        try:
+            accounts = self.store.list_accounts()
+        except Exception:
+            return
+        remaining = [str(account.id) for account in accounts]
+        if not remaining:
+            for worker in self._workers:
+                worker.account_id = None
+            return
+        for index, worker in enumerate(self._workers):
+            if worker.account_id in remaining:
+                continue
+            await self._rebind_worker(worker, remaining[index % len(remaining)])
+
     def reassign_account(self, worker: Any) -> None:
         """重启前：原账号仍在冷却就从账号表里挑一个可用且没被另一台占用的。"""
         rotator = runtime_state.rotator

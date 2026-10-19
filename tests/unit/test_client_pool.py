@@ -54,14 +54,21 @@ class FakeStore:
         return next((a for a in self._accounts if a.id == account_id), None)
 
     def get_auth_path(self, account_id: str) -> Path | None:
+        if next((a for a in self._accounts if a.id == account_id), None) is None:
+            return None
         return Path(f"/tmp/{account_id}/auth.json")
 
 
 class FakeSession:
     def __init__(self) -> None:
         self.auth_file: str | None = None
+        self.switch_auth_calls: list[str | None] = []
 
     def set_account(self, auth_file: str | None) -> None:
+        self.auth_file = auth_file
+
+    async def switch_auth(self, auth_file: str | None) -> None:
+        self.switch_auth_calls.append(auth_file)
         self.auth_file = auth_file
 
     @property
@@ -662,6 +669,54 @@ async def test_pool_session_properties_and_clear_templates(fake_store, monkeypat
 
     pool.clear_templates()
     assert all(w.client.templates_cleared == 1 for w in workers)
+
+
+# ────────────────── 手动激活 / 删除后重绑（WebUI 切换要同步所有 worker） ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_pool_activate_account_rebinds_all_workers(fake_store, monkeypatch):
+    """WebUI 手动激活要同步所有 worker：READY 蓝绿热切，休眠的改绑定待拉起。"""
+    workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
+    workers[1].state = WorkerState.STOPPED
+    pool = _pool(fake_store, workers, monkeypatch)
+
+    assert await pool.activate_account("acc_2") is True
+
+    assert [w.account_id for w in workers] == ["acc_2", "acc_2"]
+    hot, idle = workers[0].client.session, workers[1].client.session
+    assert hot.switch_auth_calls == [str(fake_store.get_auth_path("acc_2"))]
+    # 休眠的那台不能热切（switch_auth 会拉起浏览器），只预设账号
+    assert idle.switch_auth_calls == []
+    assert idle.auth_file == str(fake_store.get_auth_path("acc_2"))
+    assert all(w.client.templates_cleared == 1 for w in workers)
+
+
+@pytest.mark.asyncio
+async def test_pool_activate_account_unknown_account_fails(fake_store, monkeypatch):
+    workers = [FakeWorker(0, account_id="acc_0")]
+    pool = _pool(fake_store, workers, monkeypatch)
+
+    assert await pool.activate_account("missing") is False
+    assert workers[0].account_id == "acc_0"
+
+
+@pytest.mark.asyncio
+async def test_pool_redistribute_rebinds_only_deleted_accounts(
+    fake_store, monkeypatch
+):
+    workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
+    pool = _pool(fake_store, workers, monkeypatch)
+    fake_store._accounts = [FakeAccount("acc_0"), FakeAccount("acc_2")]  # acc_1 已删
+
+    await pool.redistribute_accounts()
+
+    assert workers[0].account_id == "acc_0"  # 仍存在：不动、不热切
+    assert workers[0].client.session.switch_auth_calls == []
+    assert workers[1].account_id == "acc_2"  # 已删：重绑到剩余账号
+    assert workers[1].client.session.switch_auth_calls == [
+        str(fake_store.get_auth_path("acc_2"))
+    ]
 
 
 class AsyncMockReturning:

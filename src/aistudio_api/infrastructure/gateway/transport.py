@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import suppress
@@ -26,8 +27,88 @@ if TYPE_CHECKING:
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.request_context import rid_suffix
 
 logger = get_logger("transport")
+
+
+def _ensure_net_trace(page: CDPPage) -> None:
+    """订阅 $rpc/ 的 CDP 网络事件（Network.enable 在 init_domains 里已开）。
+
+    页面 fetch 只会抛 ``Failed to fetch``，看不出连接被谁断的；CDP 的
+    ``Network.loadingFailed`` 带 errorText（net::ERR_CONNECTION_RESET 等）、
+    canceled / blockedReason，responseReceived 能证明响应头是否到过。
+    传输失败时拿这些回答「Google 前端断的、Chrome 断的、还是我们自己中止的」。
+    """
+    if getattr(page, "has_net_trace", False):
+        return
+    page.has_net_trace = True
+
+    def on_request(data: dict[str, object]) -> None:
+        url = str(data.get("url") or "")
+        rid = str(data.get("request_id") or "")
+        if "$rpc/" not in url or not rid:
+            return
+        page.rpc_net_requests[rid] = {"url": url, "sent_at": time.time()}
+        while len(page.rpc_net_requests) > 32:
+            page.rpc_net_requests.pop(next(iter(page.rpc_net_requests)))
+
+    def on_response(data: dict[str, object]) -> None:
+        entry = page.rpc_net_requests.get(str(data.get("request_id") or ""))
+        if entry is None:
+            return
+        entry["resp_status"] = int(str(data.get("status") or 0))
+        entry["resp_at"] = time.time()
+
+    def on_loading_failed(params: dict[str, object]) -> None:
+        # 只记我们见过 requestWillBeSent 的 $rpc/ 请求（拦掉的图片等资源不算）
+        entry = page.rpc_net_requests.get(str(params.get("requestId") or ""))
+        if entry is None:
+            return
+        entry.update(
+            {
+                "error_text": str(params.get("errorText") or ""),
+                "canceled": bool(params.get("canceled")),
+                "blocked_reason": params.get("blockedReason"),
+                "failed_at": time.time(),
+            }
+        )
+        page.rpc_net_failures.append(dict(entry))
+        del page.rpc_net_failures[:-8]
+
+    with suppress(Exception):
+        page.on_request(on_request)
+        page.on_response(on_response)
+        page.on_loading_failed(on_loading_failed)
+
+
+def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:
+    """传输失败时把最近一次 $rpc/ 网络层失败打出来（没有记录本身也是线索）。"""
+    failures = getattr(page, "rpc_net_failures", None) or []
+    if not failures:
+        logger.warning(
+            "页面 fetch 传输失败 (%s%s)：无 Network.loadingFailed 记录（页面 JS 层中止或监听晚于请求）",
+            where,
+            rid_suffix(),
+        )
+        return
+    now = time.time()
+    parts = []
+    for f in failures[-3:]:
+        tail = str(f.get("url") or "").rsplit("/", 1)[-1][:80]
+        failed_at = f.get("failed_at")
+        age = now - failed_at if isinstance(failed_at, (int, float)) else -1.0
+        parts.append(
+            f"{tail} err={f.get('error_text') or '-'} canceled={bool(f.get('canceled'))} "
+            f"blocked={f.get('blocked_reason') or '-'} resp={f.get('resp_status') or 'none'} "
+            f"age={age:.1f}s"
+        )
+    logger.warning(
+        "页面 fetch 传输失败 (%s%s)：CDP 网络层证据 %s",
+        where,
+        rid_suffix(),
+        " | ".join(parts),
+    )
 
 
 async def _evaluate_transport(
@@ -216,6 +297,7 @@ class XHRStreamTransport:
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
+        _ensure_net_trace(page)
         args = build_hooked_request_args(
             url=url,
             headers=clean_headers,
@@ -231,6 +313,7 @@ class XHRStreamTransport:
         if status == 0:
             # 页面里的网络层失败（Failed to fetch / network error / aborted）：
             # 不是上游 HTTP 错误，交给 API 层清模板后重试（未吐数据时）。
+            _log_rpc_net_evidence(page, "replay")
             raise BrowserTransportError(f"replay failed: {raw_text}")
         return status, raw_text.encode("utf-8")
 
@@ -253,6 +336,7 @@ class XHRStreamTransport:
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
+        _ensure_net_trace(page)
         rid = uuid.uuid4().hex[:8]
 
         # Ensure native binding on page and register local async queue
@@ -310,6 +394,7 @@ class XHRStreamTransport:
                         yield ("chunk", text.encode("utf-8"))
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
+                    _log_rpc_net_evidence(page, "streaming")
                     raise BrowserTransportError(f"streaming request failed: {message}")
                 elif etype in ("done", "aborted"):
                     while not queue.empty():
@@ -325,6 +410,7 @@ class XHRStreamTransport:
                     break
             if not status_sent:
                 # 与时间无关：上游没有给出任何 status 就结束了（页面脚本异常等）
+                _log_rpc_net_evidence(page, "streaming-no-status")
                 raise BrowserTransportError(
                     "streaming request ended before response status"
                 )

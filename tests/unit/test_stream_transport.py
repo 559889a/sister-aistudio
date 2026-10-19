@@ -243,3 +243,71 @@ async def test_transport_abort_stream_by_rid():
         await task2
 
     assert transport.in_flight_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replay_failure_logs_cdp_net_layer_evidence(caplog):
+    """页面 fetch 失败时要把 Network.loadingFailed 的 errorText 打进日志（断连归因）。"""
+    from aistudio_api.domain.errors import BrowserTransportError
+
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    # spec 会给未赋值属性生成 Mock（恒真），必须显式清掉哨兵
+    page.has_net_trace = False
+    page.rpc_net_requests = {}
+    page.rpc_net_failures = []
+    req_listener = None
+    fail_listener = None
+
+    def fake_on_request(cb):
+        nonlocal req_listener
+        req_listener = cb
+        return lambda: None
+
+    def fake_on_loading_failed(cb):
+        nonlocal fail_listener
+        fail_listener = cb
+        return lambda: None
+
+    page.on_request = MagicMock(side_effect=fake_on_request)
+    page.on_response = MagicMock(side_effect=lambda cb: (lambda: None))
+    page.on_loading_failed = MagicMock(side_effect=fake_on_loading_failed)
+
+    async def fake_evaluate(expr, args=None, *a, **kw):
+        # 模拟时序：CDP 先报网络层失败（连接被重置），页面 fetch 才 reject
+        if req_listener is not None and fail_listener is not None:
+            req_listener(
+                {
+                    "request_id": "r1",
+                    "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/GenerateContent",
+                    "method": "POST",
+                    "headers": {},
+                    "post_data": "",
+                }
+            )
+            fail_listener(
+                {
+                    "requestId": "r1",
+                    "errorText": "net::ERR_CONNECTION_RESET",
+                    "canceled": False,
+                    "type": "Fetch",
+                }
+            )
+        return {"status": 0, "body": "TypeError: Failed to fetch"}
+
+    page.evaluate = AsyncMock(side_effect=fake_evaluate)
+
+    with (
+        caplog.at_level("WARNING", logger="aistudio.transport"),
+        pytest.raises(BrowserTransportError),
+    ):
+        await transport.send_hooked_request(
+            page,
+            url="https://alkalimakersuite-pa.clients6.google.com/$rpc/GenerateContent",
+            headers={},
+            body="[]",
+        )
+
+    assert "net::ERR_CONNECTION_RESET" in caplog.text
+    # 证据里带响应头状态（none = 连响应头都没收到）
+    assert "resp=none" in caplog.text

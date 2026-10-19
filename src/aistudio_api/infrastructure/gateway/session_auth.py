@@ -20,7 +20,7 @@ from aistudio_api.infrastructure.browser.scripts import (
     CHECK_IDENTITY_JS,
     EXTRACT_EMAIL_JS,
 )
-from aistudio_api.infrastructure.utils.common import mask_email
+from aistudio_api.infrastructure.utils.common import atomic_write_json, mask_email
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("session.auth")
@@ -274,10 +274,8 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
             meta["email"] = discovered_email
             expected_email = discovered_email.strip().lower()
             with suppress(Exception):
-                meta_path.write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                # 池模式下两台 worker 共用同一账号目录，必须原子写防撕裂
+                atomic_write_json(meta_path, meta)
             with suppress(Exception):
                 from aistudio_api.infrastructure.account.account_store import (
                     AccountStore,
@@ -312,10 +310,7 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
         if discovered_tier:
             meta["tier"] = discovered_tier
             with suppress(Exception):
-                meta_path.write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                atomic_write_json(meta_path, meta)
             with suppress(Exception):
                 from aistudio_api.infrastructure.account.account_store import (
                     AccountStore,
@@ -391,10 +386,9 @@ async def save_browser_cookies(
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
         auth_path.parent.mkdir(parents=True, exist_ok=True)
-        auth_path.write_text(
-            json.dumps({"cookies": current_cookies, "origins": origins}, indent=2),
-            encoding="utf-8",
-        )
+        # 原子替换：池模式下两台 worker 会并发写同一份 auth.json，另一台/传输层
+        # 还在读它；直接 write_text 会让读者撞上半截 JSON（误判 Cookie 失效）。
+        atomic_write_json(auth_path, {"cookies": current_cookies, "origins": origins})
         log.info("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
     except Exception as e:
         log.debug("保存 Cookie 失败: %s", e)

@@ -308,6 +308,10 @@ class CDPPage:
         self._unsubscribers: list[Callable[[], None]] = []
         self.has_stream_binding: bool = False
         self._cached_cookies: dict[str, str] | None = None
+        # $rpc/ 网络事件证据（gateway transport 记录；传输失败时用来回答「连接被谁断的」）
+        self.has_net_trace: bool = False
+        self.rpc_net_requests: dict[str, dict[str, object]] = {}
+        self.rpc_net_failures: list[dict[str, object]] = []
 
     def _track_listener(self, unsub: Callable[[], None]) -> Callable[[], None]:
         self._unsubscribers.append(unsub)
@@ -786,6 +790,13 @@ class CDPPage:
             callback(data)
 
         return self._track_listener(self.cdp.on("Network.responseReceived", listener))
+
+    def on_loading_failed(
+        self, callback: Callable[[dict[str, object]], object]
+    ) -> Callable[[], None]:
+        """Listen to Network.loadingFailed (net-level request failures)."""
+
+        return self._track_listener(self.cdp.on("Network.loadingFailed", callback))
 
     async def get_response_body(self, request_id: str) -> str:
         """Get response body for a completed request."""
