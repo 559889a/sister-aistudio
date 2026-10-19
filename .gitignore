@@ -58,3 +58,6 @@ tools/reverse/output/
 tools/reverse/bundles/
 tools/reverse/wasm/
 
+# 本地逆向留档（bundles/userscripts/reference）：只在本地使用，绝不入库
+/逆向相关内容/
+
