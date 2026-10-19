@@ -743,3 +743,55 @@ async def test_navigate_to_aistudio_re_navigates_after_cookie_reinjection(
             save_cookies_cb=mock_save,
         )
     assert len(goto_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_snapshot_digest_ignores_code_parts(mock_cdp_page):
+    """digest 必须与页面 _.Tm 算法一致：text/inlineData/fileData 计入，代码 part 记 ""。
+
+    多算 executableCode/codeExecutionResult 会让 digest 偏离页面，按「快照绑内容」
+    的服务端校验是 403[7] 诱因（2026-10-20 独立逆向复核）。
+    """
+    from hashlib import sha256 as _sha256
+
+    session = BrowserSession(port=9222)
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
+    captured_args: dict[str, object] = {}
+
+    async def fake_evaluate(expr, args=None, *a, **kw):
+        if isinstance(args, dict) and "binding" in args:
+            captured_args.update(args)
+            return {"snapshot": "tok", "box": "synced"}
+        return None
+
+    mock_cdp_page.evaluate.side_effect = fake_evaluate
+
+    contents = [
+        AistudioContent(
+            role="user",
+            parts=[
+                AistudioPart(text="hi"),
+                AistudioPart(executable_code=("PYTHON", "print(1)")),
+                AistudioPart(code_execution_result=("OK", "1")),
+                AistudioPart(inline_data=("image/png", "QUJD")),
+            ],
+        )
+    ]
+    snapshot = await session.generate_snapshot(contents)
+
+    assert snapshot == "tok"
+    # 页面算法：text + ""（code part）+ ""（code result part）+ inlineData
+    expected_binding = "hi " + " " + " " + "QUJD"
+    assert captured_args["binding"] == expected_binding
+    assert (
+        captured_args["hash"]
+        == _sha256(expected_binding.encode("utf-8")).hexdigest()
+    )

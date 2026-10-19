@@ -285,6 +285,9 @@ aistudio-api/
 | **（第二轮）auth.json / meta.json 原子写**：`save_browser_cookies` 与身份探测回写全改 `atomic_write_json`，两台 worker 共用账号时不再可能读到半截 JSON | `infrastructure/gateway/session_auth.py` | 定向测试通过（改动机械） |
 | **（第二轮）池模式账号重绑**：`ClientPool.activate_account` / `redistribute_accounts`；WebUI 手动切换/删除/probe-import 同步所有 worker | `infrastructure/gateway/client_pool.py`、`api/routes_accounts.py` | 新增单测 ×5（池重绑 / 未知账号 / 删除重排 / 路由 pool 分支 ×2） |
 | **（第二轮）传输失败网络层证据**：`$rpc/` 请求记 `loadingFailed`（errorText/canceled/blocked/resp），`Failed to fetch` 时 WARN 归因 | `infrastructure/gateway/transport.py`、`infrastructure/browser/cdp_client.py` | 新增单测 `test_replay_failure_logs_cdp_net_layer_evidence` |
+| **（第三轮）重试耗尽不再静默空流/谎报 429**：`stream_raw_events` 抛出最后的错误渲染错误帧；非流式兜底按真实错误分类 | `application/api_service_gemini.py` | 全量 567/7 |
+| **（第三轮）debug+精简**：删死代码 `get_next_account_with_stats`（50 行）、`AIStudioClient.replay/_captured`；status_map 提常量、page_send 收尾去重、clamp_pool_size 复用 | `account_rotator.py`、`client.py`、`botguard_bootstrap.py`、`app.py` 等 | 全量 567/7，净 -50 行 |
+| **（第三轮）独立逆向复核后修复 digest**：`generate_snapshot` 剔除 executableCode/codeExecutionResult（页面 `_.Tm` 只算 text/inline/fileId，多算是 403[7] 诱因）；`wire_spec` 语义标注修正（14=responseModalities 等） | `infrastructure/gateway/session.py`、`wire_spec.py` | 新增 `test_generate_snapshot_digest_ignores_code_parts`；完整报告在 `逆向相关内容/re-verification-2026-10-20.md`（本地，不入库） |
 | 文档：binding 新构建、bypass 整段返回、池 standby 语义 | `README.md`、`AGENT.md`、`docs/BOTGUARD_VERIFICATION_CHAIN.md` | — |
 
 上一轮（同一会话）已完成、本轮继续有效：2 台 worker 池（9222/9223，`-w0`/`-w1`）、
@@ -338,9 +341,14 @@ OpenAI 兼容端口、bypass/预填充/签名哨兵。
    （browser_engine 有一条会随环境状态闪通/闪挂，2026-10-20 第二轮为 1 failed 而非 2）。
 8. **仓库状态**：改动已提交并推送到 `origin`（`559889a/sister-aistudio`）。
    不要再生成/依赖补丁文件；要看差异直接 `git diff upstream/master..origin/master`。
-9. 全量 pytest（2026-10-20 第二轮，含本轮 6 条新测试）：**567 passed / 7 failed**（7 条全是
-   §6.3.7 的环境类既有失败）；`ruff check src tests` 0 errors；pyright 与改前基线持平
-   （本机 86 条既有 errors，本轮 0 新增）。
+9. 全量 pytest（2026-10-20 第三轮）：**568 passed / 7 failed**（7 条全是 §6.3.7 的环境类既有
+   失败）；`ruff check src tests` 0 errors；pyright 与改前基线持平（本机 86 条既有，0 新增）。
+10. **独立逆向复核的遗留发现**（完整报告：`逆向相关内容/re-verification-2026-10-20.md`，
+    本地不入库）：snapKey「首匹配」启发式是最脆一环（建议升级为试签验证后采用）；
+    candidates 只取 `[0]`（多 candidate 会静默丢）；binding 请求缺 F12/F14 字段（指纹差，
+    当前被接受）；usage[6] 未解析；WIRE_SPEC.md §7.1 示例拼造、§7.4 hCb 说法无据；
+    EVERGREEN=7 与 penalties/logprobs 槽位无当前构建证据；BOTGUARD 文档 API key 陈旧
+    （key 不承担鉴权，风险低）。这些都**未修**，动前先读报告。
 
 ### 6.4 环境、命令与坑
 

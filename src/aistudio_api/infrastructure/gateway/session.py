@@ -437,6 +437,10 @@ class BrowserSession:
         """
         ctx = await self.ensure_ready()
         hash_parts: list[str] = []
+        # 与页面 bundle 的 _.Tm 对齐：digest 只取 text/inlineData/fileData 三种 part，
+        # 其余（含 executableCode / codeExecutionResult / functionCall）一律记 ""。
+        # 多算代码 part 会让 digest 偏离页面算法，按「快照绑内容」的校验是 403[7] 诱因
+        # （2026-10-20 独立逆向复核，逆向相关内容/ bundles 双向验证）。
         for content in contents:
             for part in content.parts:
                 if part.text is not None:
@@ -445,10 +449,6 @@ class BrowserSession:
                     hash_parts.append(str(part.inline_data[1]))
                 elif part.file_id is not None:
                     hash_parts.append(str(part.file_id))
-                elif part.executable_code is not None:
-                    hash_parts.append(str(part.executable_code[1]))
-                elif part.code_execution_result is not None:
-                    hash_parts.append(str(part.code_execution_result[1]))
                 else:
                     hash_parts.append("")
 

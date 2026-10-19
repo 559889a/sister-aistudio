@@ -44,7 +44,12 @@ class PartIndex(IntEnum):
 
 
 class GenerationConfigIndex(IntEnum):
-    """Indexes in the generationConfig array."""
+    """Indexes in the generationConfig array.
+
+    语义标注经 2026-10-20 独立逆向复核（当前 bundle 的 setter 链 kUa..yUa + fixtures
+    双向验证，见 逆向相关内容/re-verification-2026-10-20.md）；「无当前构建证据」的
+    槽位保留编号但别当既定字段用。
+    """
 
     STOP_SEQUENCES = 1
     MAX_TOKENS = 3
@@ -53,10 +58,15 @@ class GenerationConfigIndex(IntEnum):
     TOP_K = 6
     RESPONSE_MIME_TYPE = 7
     RESPONSE_SCHEMA = 8
+    # 以下 9/10/11/12（penalties/logprobs）：当前页面构建无写入点，仅旧证据支持
     PRESENCE_PENALTY = 9
     FREQUENCY_PENALTY = 10
     RESPONSE_LOGPROBS = 11
     LOGPROBS = 12
+    # 真实语义是 responseModalities（repeated 枚举 1=TEXT/2=IMAGE/3=AUDIO），
+    # 不是「图片输出模式」；[2]/[2,1] 恰与历史取值重合所以沿用不改名。
+    # 13 = 语音配置 bool（pya，非 AUDIO 且模型有 capability 18 时为真），未用。
+    # 15 = apiKey（setApiKey），仓库未用。表达 AUDIO 模态时须按枚举写值。
     IMAGE_OUTPUT_MODE = 14
     THINKING_CONFIG = 16
     MEDIA_RESOLUTION = 17
