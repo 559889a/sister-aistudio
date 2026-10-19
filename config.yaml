@@ -1,100 +1,25 @@
-# API 客户端调用鉴权密钥列表 (用于外部客户端调用 /v1beta/... 接口鉴权)
-# 留空 [] 表示对外 API 免 Key 开放调用；配置密钥后客户端必须携带对应 Key 访问。
-api_keys: []
-
-# 服务端日志与请求转储调试配置
+api_keys:
+- name: '1'
+  key: sk-123
+  created_at: '2026-10-19 08:07:04'
 logging:
-  # 日志输出级别: DEBUG / INFO / WARNING / ERROR
   level: INFO
-  # 是否转储每次 API 请求与响应的完整报文详情 (支持通过环境变量 DEBUG=true 触发)
   dump_requests: false
-  # 是否将请求与响应转储落盘为独立文件 (支持环境变量 AISTUDIO_DUMP_FILE=true 触发)
   dump_to_file: false
-  # 转储文件保存目录 (默认为项目根目录下 dumps/)
   dump_dir: dumps
-
 model_defaults:
-  # 是否自动丢弃下游客户端传入的未知/不支持参数（如 HARM_CATEGORY_CIVIC_INTEGRITY、不兼容的内置工具等）
-  # 设置为 true 时自动过滤异常参数，避免 Google 上游返回 400 INVALID_ARGUMENT 报错
   drop_unsupported_params: false
-
-  # profiles: 按模型名规则匹配，适合整类模型共用默认配置
   profiles:
-    # 生图模型默认配置
-    - name: image_models
-      match:
-        contains:
-          - image
-      # 命中后视为生图模型
-      is_image_model: true
-      # 生图模型可选内置工具名：
-      # - google_search                    仅网页搜索
-      # - image_search                     仅图片搜索
-      # - google_search_and_image_search   网页搜索 + 图片搜索
-      default_tools:
-        - google_search_and_image_search
-      # generation_config_defaults 会映射到内部 wire generation_config
-      generation_config_defaults:
-        # 生图通常不需要显式 response mime type
-        response_mime_type: null
-        # image_only 或 text_and_image
-        image_output_mode: image_only
-        # thinking_config 最终会编码成 wire 数组
-        thinking_config:
-          # LOW / MEDIUM / HIGH / MINIMAL
-          level: MINIMAL
-          mode: 1
-      # 某些生图模型不接受这些 generation_config 下标，发请求前会清空
-      clear_generation_config_indexes:
-        - 7
-        - 13
-        - 17
-      # 当前生图模型默认不下发 safety_settings
-      disable_safety_settings: true
-
-    # Gemma 文本模型默认配置
-    - name: gemma_models
-      match:
-        prefixes:
-          - gemma-
-      # Gemma 系列只能选这两个内置工具：
-      # - google_search
-      # - code_execution
-      default_tools:
-        - google_search
-      # 1 = 最严格拦截
-      # 5 = 关闭
-      safety_settings:
-        Harassment: 5
-        Hate: 5
-        Sexually Explicit: 5
-        Dangerous Content: 5
-
-    # Gemini 文本模型默认配置
-    - name: gemini_models
-      match:
-        prefixes:
-          - gemini-
-      # Gemini 系列可选 4 个内置工具：
-      # - google_search
-      # - code_execution
-      # - google_maps
-      # - url_context
-      default_tools:
-        - google_search
-      safety_settings:
-        Harassment: 5
-        Hate: 5
-        Sexually Explicit: 5
-        Dangerous Content: 5
-      # 自动丢弃下游客户端传入的未知/非法参数（如 HARM_CATEGORY_CIVIC_INTEGRITY），防止上游 400 报错
-      drop_unsupported_params: true
-
-  # models: 对单个模型做精确覆盖，优先级高于上面的 profiles
-  # 例如：
-  # models:
-  #   gemini-3.1-flash-image-preview:
-  #     generation_config_defaults:
-  #       image_output_mode: text_and_image
-  #       media_resolution: HIGH
+  - name: gemini_models
+    match:
+      prefixes:
+      - gemini-
+    default_tools:
+    - google_search
+    safety_settings:
+      Harassment: 5
+      Hate: 5
+      Sexually Explicit: 5
+      Dangerous Content: 5
+    drop_unsupported_params: true
   models: {}

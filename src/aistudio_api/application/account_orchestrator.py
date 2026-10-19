@@ -156,8 +156,15 @@ async def try_switch_account(
 
 
 async def ensure_active_account(attempt: int, model: str | None = None) -> None:
-    """确保在初次尝试时存在活跃账号，且该账号对目标模型可用。"""
+    """确保在初次尝试时存在活跃账号，且该账号对目标模型可用。
+
+    pool 模式（ClientPool）由池子自己按 least-inflight + 账号可用性选 worker，
+    这里不再动「全局活跃账号」——否则会和 worker 各自绑定的账号打架。
+    """
     if attempt != 0:
+        return
+    client = runtime_state.client
+    if getattr(client, "is_pool", False) is True:
         return
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
@@ -174,11 +181,21 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
 def record_rotator_event(
     event: str,
     model: str | None = None,
+    *,
+    account_id: str | None = None,
 ) -> None:
-    """记录调度器事件（成功、限流、错误、鉴权异常）。"""
+    """记录调度器事件（成功、限流、错误、鉴权异常、登录态失效）。
+
+    ``account_id`` 是给 pool 模式用的：一次请求可能落在任意 worker 自己的账号上，
+    不能拿「全局活跃账号」顶替。单浏览器路径不传，行为不变。
+    """
     rotator = runtime_state.rotator
     account_service = runtime_state.account_service
-    account = account_service.get_active_account() if account_service else None
+    account = None
+    if account_id and account_service is not None:
+        account = account_service.get_account(account_id)
+    if account is None and account_service is not None:
+        account = account_service.get_active_account()
     if not rotator or account is None:
         return
     if event == "success":
@@ -187,6 +204,8 @@ def record_rotator_event(
         rotator.record_rate_limited(account.id, model=model)
     elif event == "auth_error":
         rotator.record_auth_error(account.id, model=model)
+    elif event == "session_expired":
+        rotator.record_session_expired(account.id, model=model)
     elif event == "error":
         rotator.record_error(account.id, model=model)
 

@@ -22,6 +22,24 @@ def test_streaming_scripts_defined_and_non_empty():
     assert len(STREAM_CLEANUP_JS.strip()) > 0
     assert "__AISTUDIO__" in STREAMING_INIT_JS
     assert "__AISTUDIO__" in STREAM_CLEANUP_JS
+    # 生成等待时长看门狗已彻底删除：页面脚本里不再有 timeout 定时器
+    assert "setTimeout" not in STREAMING_INIT_JS
+
+
+def test_streaming_scripts_have_no_generation_timeout_args():
+    """页面脚本参数里不再传 timeout（生成等多久都不该被自己掐断）。"""
+    from aistudio_api.infrastructure.browser.scripts import (
+        build_hooked_request_args,
+        build_streaming_init_args,
+    )
+
+    streaming_args = build_streaming_init_args(
+        url="http://x", headers={}, body="{}", rid="r1"
+    )
+    assert "timeout" not in streaming_args
+    assert "timeoutMs" not in streaming_args
+    hooked_args = build_hooked_request_args(url="http://x", headers={}, body="{}")
+    assert "timeout" not in hooked_args
 
 
 @pytest.mark.asyncio
@@ -72,7 +90,6 @@ async def test_transport_native_cdp_binding_stream_push():
         url="http://test.com",
         headers={},
         body="{}",
-        timeout_ms=3000,
     ):
         collected.append((tag, payload))
 
@@ -84,8 +101,8 @@ async def test_transport_native_cdp_binding_stream_push():
 
 
 @pytest.mark.asyncio
-async def test_transport_streaming_timeout_raises():
-    """Verify stream timeout before completion explicitly raises TimeoutError."""
+async def test_transport_stream_never_fails_just_because_time_passed():
+    """没有生成等待时长看门狗：上游静默很久也不会自己失败，只等 liveness。"""
     transport = XHRStreamTransport()
     page = MagicMock(spec=CDPPage)
     binding_listener = None
@@ -97,6 +114,7 @@ async def test_transport_streaming_timeout_raises():
 
     page.on_binding = MagicMock(side_effect=mock_on_binding)
     page.add_binding = AsyncMock()
+    page.is_closed = MagicMock(return_value=False)
 
     captured_rid = None
 
@@ -108,26 +126,64 @@ async def test_transport_streaming_timeout_raises():
 
     page.evaluate = AsyncMock(side_effect=fake_evaluate)
 
-    async def push_status_only():
+    async def push_after_long_silence():
         while captured_rid is None or binding_listener is None:
             await asyncio.sleep(0.01)
         binding_listener(
             json.dumps({"rid": captured_rid, "type": "status", "status": 200})
         )
+        # 超过旧实现里最短的 1.2s 看门狗很多倍：现在必须继续等而不是报超时
+        await asyncio.sleep(1.2)
+        binding_listener(
+            json.dumps({"rid": captured_rid, "type": "chunk", "text": "late"})
+        )
+        binding_listener(json.dumps({"rid": captured_rid, "type": "done"}))
 
-    push_task = asyncio.create_task(push_status_only())
-    with pytest.raises(
-        TimeoutError, match="streaming response timed out before completion"
+    push_task = asyncio.create_task(push_after_long_silence())
+
+    collected = []
+    async for tag, payload in transport.send_streaming_request(
+        page,
+        url="http://test.com",
+        headers={},
+        body="{}",
     ):
+        collected.append((tag, payload))
+
+    await push_task
+
+    assert ("status", 200) in collected
+    assert ("chunk", b"late") in collected
+
+
+@pytest.mark.asyncio
+async def test_transport_stream_fails_when_page_closed():
+    """页面/浏览器真的没了仍然要失败（基础设施失败，不是时间到期）。"""
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.on_binding = MagicMock()
+    page.add_binding = AsyncMock()
+    page.is_closed = MagicMock(return_value=False)
+
+    async def fake_evaluate(expr, args=None, *a, **kw):
+        return
+
+    page.evaluate = AsyncMock(side_effect=fake_evaluate)
+
+    async def close_page_soon():
+        await asyncio.sleep(0.05)
+        page.is_closed = MagicMock(return_value=True)
+
+    close_task = asyncio.create_task(close_page_soon())
+    with pytest.raises(RuntimeError, match="Browser page closed during streaming"):
         async for _ in transport.send_streaming_request(
             page,
             url="http://test.com",
             headers={},
             body="{}",
-            timeout_ms=100,
         ):
             pass
-    await push_task
+    await close_task
 
 
 @pytest.mark.asyncio
@@ -155,7 +211,6 @@ async def test_transport_abort_stream_by_rid():
             url="http://test.com",
             headers={},
             body="{}",
-            timeout_ms=5000,
         ):
             pass
 

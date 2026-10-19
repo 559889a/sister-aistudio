@@ -5,14 +5,14 @@ import { useToastStore } from '@/stores/toast.ts'
 import type { SystemConfig } from '@/types/system.ts'
 import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
-import VisualConfigEditor from '@/components/config/VisualConfigEditor.vue'
 import {
   Server,
   CheckCircle2,
   AlertCircle,
-  Cpu,
   Globe,
   Lock,
+  Zap,
+  ArrowRight,
 } from 'lucide-vue-next'
 
 const toast = useToastStore()
@@ -42,12 +42,33 @@ onMounted(() => {
     <!-- Top Title -->
     <div>
       <h2 class="text-xl font-bold text-gray-900 tracking-tight">
-        系统与模型规则配置
+        系统配置
       </h2>
+      <p class="text-xs text-gray-500 mt-1">
+        服务状态、日志与 API Key 管理。
+      </p>
     </div>
 
+    <!-- Runtime settings pointer (different layer from config.yaml) -->
+    <router-link
+      to="/runtime-settings"
+      class="group flex items-start sm:items-center justify-between gap-3 px-4 py-3 bg-brand-50/60 border border-brand-200/80 rounded-xl transition-colors hover:border-brand-300 hover:bg-brand-50"
+    >
+      <div class="flex items-start gap-2.5 min-w-0">
+        <Zap class="w-4 h-4 text-brand-600 shrink-0 mt-0.5" />
+        <div class="text-xs leading-relaxed text-brand-900">
+          <span class="font-semibold">参数覆写 / 预填充兼容 / 工具调用 bypass 属于「运行期设置」</span>
+          <span class="text-brand-900/75">—— 保存后立即生效、无需重启，已独立成页。</span>
+        </div>
+      </div>
+      <span class="inline-flex items-center gap-1 shrink-0 text-[11px] font-semibold text-brand-700">
+        <span>前往</span>
+        <ArrowRight class="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5" />
+      </span>
+    </router-link>
+
     <!-- Server Runtime Status Cards -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
         <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
           <Server class="w-4 h-4 text-blue-600" />
@@ -58,19 +79,6 @@ onMounted(() => {
         </div>
         <div class="text-[11px] text-gray-400 mt-1">
           无头模式: {{ config?.browser_headless ? '开启 (Headless)' : '禁用' }}
-        </div>
-      </div>
-
-      <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
-        <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          <Cpu class="w-4 h-4 text-emerald-600" />
-          <span>流式响应超时</span>
-        </div>
-        <div class="text-base font-bold text-gray-900 font-mono">
-          {{ config?.timeout_stream || 120 }}s
-        </div>
-        <div class="text-[11px] text-gray-400 mt-1">
-          单次流式生成最大等待时间
         </div>
       </div>
 
@@ -141,12 +149,5 @@ onMounted(() => {
     />
     <!-- API Key Management Card -->
     <ApiKeyManagerCard />
-
-    <!-- Visual & YAML Model Config Editor -->
-    <VisualConfigEditor
-      v-if="config"
-      :initial-yaml="config.yaml_content"
-      @saved="loadConfig"
-    />
   </div>
 </template>

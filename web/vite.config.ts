@@ -22,6 +22,12 @@ export default defineConfig({
       '/config': 'http://localhost:8080',
       '/api-keys': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
+      // /settings 既是前端页面路由（系统配置页之外的另一页）又是运行期设置 API：
+      // 浏览器导航（Accept 带 text/html）交给 Vite 的 SPA，只有 XHR/fetch 才转发给后端。
+      '/settings': {
+        target: 'http://localhost:8080',
+        bypass: (req) => (req.headers.accept?.includes('text/html') ? '/index.html' : undefined),
+      },
     },
   },
   build: {
@@ -35,7 +41,6 @@ export default defineConfig({
         manualChunks: {
           'vendor-vue': ['vue', 'vue-router', 'pinia'],
           'vendor-icons': ['lucide-vue-next'],
-          'vendor-yaml': ['yaml'],
         },
       },
     },

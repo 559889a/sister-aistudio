@@ -43,6 +43,15 @@ def _load_int_env(*names: str, default: int) -> int:
         return default
     return int(value)
 
+
+def clamp_pool_size(value: int) -> int:
+    """浏览器 worker 池大小夹在 1..4（1 = 旧的单浏览器路径）。"""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(4, size))
+
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
@@ -251,8 +260,14 @@ def _resolve_default_idle_timeout() -> int:
 @dataclass(slots=True)
 class Settings:
     port: int = int(os.getenv("AISTUDIO_PORT", "8080"))
+    # 监听地址：默认 0.0.0.0（对局域网/其它设备开放）。只想本机访问就设 AISTUDIO_HOST=127.0.0.1。
+    host: str = os.getenv("AISTUDIO_HOST", "0.0.0.0")
     browser_port: int = _load_int_env(
         "AISTUDIO_BROWSER_PORT", default=DEFAULT_BROWSER_PORT
+    )
+    # 浏览器 worker 池大小：1 = 旧的单浏览器路径（兼容）；2+ = 多台 Chromium 负载均衡。
+    browser_pool_size: int = clamp_pool_size(
+        _load_int_env("AISTUDIO_BROWSER_POOL_SIZE", default=2)
     )
     browser_headless: bool = _load_bool_env("AISTUDIO_BROWSER_HEADLESS", default=True)
     browser_executable_path: str | None = os.getenv("AISTUDIO_BROWSER_EXECUTABLE")
@@ -262,8 +277,6 @@ class Settings:
     proxy_url: str | None = discover_proxy_url()
     web_password: str | None = _load_web_password()
     api_keys: frozenset[str] = frozenset()
-    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
-    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
     timezone: str = resolve_timezone()
     locale: str = resolve_locale()
     dump_raw_response: bool = os.getenv("AISTUDIO_DUMP_RAW_RESPONSE", "0") in (

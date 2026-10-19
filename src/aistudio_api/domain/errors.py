@@ -27,6 +27,18 @@ class RequestError(AistudioError):
         super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
 
 
+class BrowserTransportError(RuntimeError):
+    """页面里的 fetch/XHR 传输失败（网络层错误，不是上游返回的 HTTP 状态）。
+
+    典型现场：`streaming request failed: Failed to fetch`——请求已经发出去了，但浏览器
+    侧的连接被重置/中断，拿不到任何响应。这类失败和账号、鉴权无关，也不是上游的业务
+    错误（那种会以 `RequestError(status)` 抛出来）。
+
+    继承 RuntimeError 保持既有调用方与用例的捕获兼容；网关侧按「还没拿到任何响应」的
+    瞬时传输失败处理：清模板缓存，未吐数据时原地重试，重试耗尽报 502 而不是 500。
+    """
+
+
 GRPC_CODE_TO_HTTP: dict[int, int] = {
     1: 499,  # CANCELLED
     2: 500,  # UNKNOWN

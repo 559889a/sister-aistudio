@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 from unittest.mock import patch
 
 import httpx
@@ -46,12 +47,25 @@ def test_unified_formatter_plain_and_colored():
 
     plain_output = plain_formatter.format(record)
     assert "[INFO]" in plain_output
-    assert "[aistudio.test]" in plain_output
+    # 与主项目对齐的固定产品 tag + UTC ISO 毫秒时间戳
+    assert "[aistudio-api]" in plain_output
+    assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", plain_output)
     assert "这是一条中文测试日志" in plain_output
 
     color_output = color_formatter.format(record)
     assert "\033[32m" in color_output  # Green color code for INFO
     assert "这是一条中文测试日志" in color_output
+
+    warn_record = logging.LogRecord(
+        name="aistudio.test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=11,
+        msg="warn",
+        args=(),
+        exc_info=None,
+    )
+    assert "[WARN]" in plain_formatter.format(warn_record)
 
 
 def test_logger_namespace_hierarchy():

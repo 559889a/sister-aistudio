@@ -494,7 +494,13 @@ class AccountRotator:
     def is_account_available(self, account_id: str, model: str | None = None) -> bool:
         """检查指定账号在特定模型下是否健康可用。"""
         stats = self.get_account_stats(account_id)
-        return bool(stats and stats.is_available(model))
+        if stats is None:
+            # 刚导入/刚启动、还没跑过任何请求的账号没有统计对象。这里必须按
+            # 「未限流」处理：返回 False 会让编排器把每个账号的**第一次**请求
+            # 误判成「当前账号不可用」，触发一次强制重建会话（实测第一次请求
+            # 就这样白丢 40 秒并失败）。
+            return True
+        return stats.is_available(model)
 
     def _get_available_accounts(
         self, model: str | None = None, *, ignore_auth_cooldown: bool = False

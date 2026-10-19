@@ -30,6 +30,7 @@ from .dependencies import require_api_key, require_web_auth
 from .routes_accounts import router as accounts_router
 from .routes_gemini import router as gemini_router
 from .routes_models import router as models_router
+from .routes_openai import router as openai_router
 from .routes_system import (
     protected_router as system_protected_router,
     public_router as system_public_router,
@@ -53,10 +54,22 @@ async def lifespan(_app: FastAPI):
 
     install_process_cleanup_handlers()
 
-    client = AIStudioClient(
-        port=runtime_state.browser_port,
-    )
-    runtime_state.client = client
+    # 浏览器 worker 池：pool_size>1 时用 ClientPool（多台 Chromium 负载均衡 + 失败自愈），
+    # =1 时保持原来的单浏览器路径（现有测试与兼容性都靠它）。
+    pool_size = max(1, min(4, int(settings.browser_pool_size)))
+    client: object
+    if pool_size > 1:
+        from aistudio_api.infrastructure.gateway.client_pool import ClientPool
+
+        client = ClientPool(
+            size=pool_size,
+            port_base=runtime_state.browser_port,
+        )
+    else:
+        client = AIStudioClient(
+            port=runtime_state.browser_port,
+        )
+    runtime_state.client = client  # type: ignore[assignment]
 
     # 初始化账号管理服务
     account_store = AccountStore()
@@ -68,18 +81,19 @@ async def lifespan(_app: FastAPI):
     runtime_state.rotator = rotator
 
     logger.info(
-        "Client initialized (port=%s, accounts=%d)",
+        "Client initialized (pool=%d, port=%s, accounts=%d)",
+        pool_size,
         runtime_state.browser_port,
         len(account_store.list_accounts()),
     )
 
-    # 后台预热浏览器，避免首次请求延迟
+    # 后台预热浏览器，避免首次请求延迟（池模式下内部串行拉起，避免两台同时开的内存峰值）
     warmup_task = None
 
     async def _warmup():
         for attempt in range(3):
             try:
-                await client.warmup()
+                await client.warmup()  # type: ignore[attr-defined]
                 return
             except Exception as e:
                 if attempt < 2:
@@ -96,10 +110,16 @@ async def lifespan(_app: FastAPI):
             while True:
                 await asyncio.sleep(10.0)
                 try:
-                    if runtime_state.client and getattr(
-                        runtime_state.client, "_session", None
-                    ):
-                        await runtime_state.client._session.check_idle_timeout()
+                    active_client = runtime_state.client
+                    if active_client is None:
+                        continue
+                    check_pool = getattr(active_client, "check_idle_timeouts", None)
+                    if callable(check_pool):
+                        await check_pool()
+                        continue
+                    session = getattr(active_client, "_session", None)
+                    if session is not None:
+                        await session.check_idle_timeout()
                 except Exception as e:
                     logger.debug("空闲回收检查异常: %s", e)
 
@@ -175,10 +195,23 @@ app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
+# OpenAI 兼容端口（/v1/chat/completions、/v1/models）：与 Gemini 端口共用同一套上游链路
+app.include_router(openai_router, dependencies=[Depends(require_api_key)])
 
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    if _request.url.path.startswith("/v1/") and not _request.url.path.startswith(
+        "/v1beta"
+    ):
+        # OpenAI 客户端：错误体按 OpenAI 形状给（依赖注入阶段的 401/503 也走这条）
+        from aistudio_api.application.openai_bridge import openai_error_payload
+
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error_payload(exc),
+            headers=getattr(exc, "headers", None),
+        )
     code, msg, status_str = classify_gemini_error_payload(exc)
     return JSONResponse(
         status_code=code,
@@ -197,6 +230,13 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
 async def validation_exception_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    if _request.url.path.startswith("/v1/") and not _request.url.path.startswith(
+        "/v1beta"
+    ):
+        # OpenAI 客户端按 error.message / error.code 解析错误
+        from aistudio_api.application.openai_bridge import openai_error_payload
+
+        return JSONResponse(status_code=400, content=openai_error_payload(exc))
     code, msg, status_str = 400, str(exc), "INVALID_ARGUMENT"
     return JSONResponse(
         status_code=code,
@@ -303,8 +343,10 @@ async def logging_and_dump_middleware(request, call_next):
             response_text=resp_text,
             is_stream=is_event_stream,
         )
-    elif not is_static:
-        logger.info(
+    elif not is_static and response.status_code >= 400:
+        # 2xx 的非 LLM 请求（健康检查、面板轮询、静态资源）不写日志：
+        # 它们在终端里只是噪声，真正的 LLM 请求日志由各路由自己带 request id 打。
+        logger.warning(
             "HTTP %s %s -> %d (%.1fms)",
             request.method,
             path,
@@ -346,7 +388,7 @@ async def spa_navigation_middleware(request: Request, call_next):
     is_api = request.url.path.startswith(
         (
             "/api",
-            "/v1beta",
+            "/v1",  # 含 /v1beta（Gemini）与 /v1/chat/completions、/v1/models（OpenAI）
             "/auth",
             "/assets",
             "/static",
@@ -394,6 +436,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="AI Studio API Server")
     parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument(
+        "--host",
+        default=settings.host,
+        help="监听地址；默认 0.0.0.0（局域网可访问），只本机用 127.0.0.1",
+    )
     parser.add_argument("--browser-port", type=int, default=settings.browser_port)
     args = parser.parse_args()
 
@@ -401,5 +448,6 @@ def main():
 
     import uvicorn
 
-    logger.info("正在启动服务，监听端口 %s", args.port)
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    logger.info("正在启动服务，监听 %s:%s", args.host, args.port)
+    # access_log=False：uvicorn 的逐请求访问日志与 LLM 请求日志重复且全是噪声
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)

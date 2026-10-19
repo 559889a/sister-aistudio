@@ -4,6 +4,7 @@ const LoginView = () => import('@/views/LoginView.vue')
 const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
+const RuntimeSettingsView = () => import('@/views/RuntimeSettingsView.vue')
 
 const routes: RouteRecordRaw[] = [
   {
@@ -29,6 +30,12 @@ const routes: RouteRecordRaw[] = [
     name: 'settings',
     component: SettingsView,
     meta: { title: '系统配置' },
+  },
+  {
+    path: '/runtime-settings',
+    name: 'runtime-settings',
+    component: RuntimeSettingsView,
+    meta: { title: '运行期设置' },
   },
   {
     path: '/:pathMatch(.*)*',

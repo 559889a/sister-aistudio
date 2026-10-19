@@ -469,7 +469,6 @@ async def test_browser_session_send_streaming_batch_events():
         url="https://example.com",
         headers={},
         body="[]",
-        timeout_ms=5000,
     ):
         results.append((tag, data))
 

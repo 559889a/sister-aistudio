@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LayoutDashboard, Users, Sliders, Key, LogOut } from 'lucide-vue-next'
+import { LayoutDashboard, Users, Sliders, Settings2, Key, LogOut } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth.ts'
 import { useRouter, useRoute } from 'vue-router'
 import { useSystemHealth } from '@/composables/useSystemHealth.ts'
@@ -30,9 +30,14 @@ const navItems = [
     icon: Users,
   },
   {
-    name: '系统与模型配置',
+    name: '系统配置',
     path: '/settings',
     icon: Sliders,
+  },
+  {
+    name: '运行期设置',
+    path: '/runtime-settings',
+    icon: Settings2,
   },
 ]
 

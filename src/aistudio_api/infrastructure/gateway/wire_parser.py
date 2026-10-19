@@ -14,6 +14,9 @@ from aistudio_api.infrastructure.utils.common import (
     extract_outer_json,
 )
 
+# Gemini content 的合法角色名；用于识别「内容块 [parts, role] 被当成 part 传进来」
+_ROLE_NAMES = frozenset({"model", "user", "system", "assistant"})
+
 # ==============================================================================
 # Google Protobuf-over-JSON Wire Array Specifications (docs/WIRE_SPECIFICATION.md)
 # ==============================================================================
@@ -133,9 +136,14 @@ def parse_response_part(raw_part: object) -> ResponsePart:
     if len(raw_part) > 0 and isinstance(raw_part[0], list):
         return ResponsePart()
 
-    # Guard against role name in 2-element structure where index 1 is role
-    if len(raw_part) == 2 and raw_part[1] in ("model", "user", "system", "assistant"):
-        return ResponsePart()
+    # Guard against role name in 2-element structure where index 1 is role.
+    # 只有「下标 0 是 parts 列表 / 也是角色名」才算内容块；`[None, "model"]` 是
+    # 「正文恰好是 model 这个词」的合法 text part，按角色名一律吞掉会真的丢字
+    # （流式分块边界上整块正文正好等于 model/user/system/assistant 时就会发生）。
+    if len(raw_part) == 2 and raw_part[1] in _ROLE_NAMES:
+        first = raw_part[0]
+        if isinstance(first, list) or (isinstance(first, str) and first in _ROLE_NAMES):
+            return ResponsePart()
 
     thought = False
     if len(raw_part) > WIRE_PART_THOUGHT_FLAG_INDEX and isinstance(
@@ -161,14 +169,14 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         raw_inline = raw_part[WIRE_PART_INLINE_DATA_INDEX]
         inline_data = (str(raw_inline[0]), str(raw_inline[1]))
 
-    function_call = _coerce_wire_payload(
+    function_call = _coerce_structural_payload(
         raw_part[WIRE_PART_FUNCTION_CALL_INDEX]
         if len(raw_part) > WIRE_PART_FUNCTION_CALL_INDEX
         else None,
         "functionCall",
     )
     if function_call is None and len(raw_part) > WIRE_PART_FUNCTION_CALL_ALT_INDEX:
-        function_call = _coerce_wire_payload(
+        function_call = _coerce_structural_payload(
             raw_part[WIRE_PART_FUNCTION_CALL_ALT_INDEX], "functionCall"
         )
     thought_signature = (
@@ -184,7 +192,7 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         if isinstance(raw, list) and len(raw) > 2 and isinstance(raw[2], str):
             function_call["call_id"] = raw[2]
 
-    function_response = _coerce_wire_payload(
+    function_response = _coerce_structural_payload(
         raw_part[WIRE_PART_FUNCTION_RESPONSE_INDEX]
         if len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_INDEX
         else None,
@@ -194,7 +202,7 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         function_response is None
         and len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX
     ):
-        function_response = _coerce_wire_payload(
+        function_response = _coerce_structural_payload(
             raw_part[WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX], "functionResponse"
         )
 
@@ -258,6 +266,21 @@ def _coerce_wire_payload(
             list_payload["call_id"] = raw_value[2]
         return list_payload
     return {"type": payload_type, "raw": raw_value}
+
+
+def _coerce_structural_payload(
+    raw_value: object, payload_type: str
+) -> dict[str, object] | None:
+    """只接受结构化（list/dict）载荷。
+
+    下标 10/11 与思考标记共用：布尔/整数/字符串出现在那里时它是标记，不是
+    functionCall/functionResponse。老写法对任何非 None 标量都包成
+    `{"type": ..., "raw": True}` ⇒ 思维链 part 会凭空多出一个「工具调用」，
+    OpenAI 端口就会吐出一个名字为 unknown_function 的假 tool_call。
+    """
+    if not isinstance(raw_value, (list, dict)):
+        return None
+    return _coerce_wire_payload(raw_value, payload_type)
 
 
 def _is_wire_value(val: object) -> bool:

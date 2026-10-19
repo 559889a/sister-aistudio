@@ -1,8 +1,119 @@
 ((() => {
     window.__AISTUDIO__ = window.__AISTUDIO__ || {};
-    window.__AISTUDIO__.interceptBootstrap = true;
-    window.__AISTUDIO__.capturedTemplate = null;
-    if (window.__AISTUDIO__.hooked && window.__AISTUDIO__.snapKey) return 'already_hooked';
+    // 只在首装时初始化：document-start 注入后会轮询重试，重复初始化会把刚捕获的模板清掉
+    if (window.__AISTUDIO__.interceptBootstrap === undefined) {
+        window.__AISTUDIO__.interceptBootstrap = true;
+    }
+    if (window.__AISTUDIO__.capturedTemplate === undefined) {
+        window.__AISTUDIO__.capturedTemplate = null;
+    }
+
+    // ==================== 阶段 0：与「发消息」无关的两处采集 ====================
+    // 这两段来自 gemini2api 执行器 v2.0.0：页面一加载就能把 WAA 服务与公共请求头
+    // 拿在手里，**不需要用户在页面上发任何一条消息**。
+    //   - 服务：Angular DI 造出来的 BotGuardService 单例，从 inject(TB) 与
+    //     TB.prototype.initialize / getMetadata 接住 this；
+    //   - 头：页面自己的 `/$rpc/` 请求带的那套（x-goog-api-key / x-aistudio-*），
+    //     合并保留，缺 x-goog-ext-* 也没关系（读类 RPC 同样带会话级头）。
+
+    const denyHeader = (name) => /^(content-length|host|connection)$/i.test(String(name));
+
+    const recordHeaders = (headers) => {
+        try {
+            const out = {};
+            if (headers && typeof headers.forEach === 'function' && !Array.isArray(headers)) {
+                headers.forEach((value, name) => {
+                    if (!denyHeader(name)) out[String(name).toLowerCase()] = String(value);
+                });
+            } else if (Array.isArray(headers)) {
+                for (const pair of headers) {
+                    if (pair && pair.length >= 2 && !denyHeader(pair[0])) {
+                        out[String(pair[0]).toLowerCase()] = String(pair[1]);
+                    }
+                }
+            } else if (headers && typeof headers === 'object') {
+                for (const name of Object.keys(headers)) {
+                    if (!denyHeader(name)) out[String(name).toLowerCase()] = String(headers[name]);
+                }
+            }
+            if (Object.keys(out).length === 0) return;
+            // 合并而不是覆盖：启动 RPC 的公共头不能被后来的请求冲掉
+            window.__AISTUDIO__.rpcHeaders = Object.assign({}, window.__AISTUDIO__.rpcHeaders || {}, out);
+        } catch (e) {}
+    };
+
+    const isRpcUrl = (url) => String(url || '').includes('/$rpc/');
+
+    const installServiceTap = () => {
+        const dms = window.default_MakerSuite;
+        // 只依赖 `dms.n`（页面自己的 inject）。**别再要求 `dms.TB`**：
+        // 2026-10-20 的构建里 `default_MakerSuite.TB` 已经不存在了，
+        // 旧探针因此一次都没装上，binding 引导每次启动都白等 35 秒才回退 page_send。
+        if (!dms || typeof dms.n !== 'function') return false;
+        if (window.__AISTUDIO__.serviceTapInstalled) return true;
+        window.__AISTUDIO__.serviceTapInstalled = true;
+
+        const capture = (instance, via) => {
+            const state = window.__AISTUDIO__;
+            if (!instance || state.service) return;
+            state.service = instance;
+            state.captureVia = via;
+        };
+
+        // 新版构建认形状：BotGuardService 的签名器挂在 `service.A.snapshot` 上
+        // （旧构建的 `dms.TB` 只是那个类的导出名，名字随构建变、形状不变）。
+        const looksLikeService = (obj) => {
+            try {
+                return !!(
+                    obj &&
+                    typeof obj === 'object' &&
+                    obj.A &&
+                    typeof obj.A === 'object' &&
+                    typeof obj.A.snapshot === 'function'
+                );
+            } catch (e) {
+                return false;
+            }
+        };
+
+        try {
+            const inject = dms.n;
+            if (!inject.__aistudio_tap) {
+                const wrapped = function (token) {
+                    const out = inject.apply(this, arguments);
+                    try {
+                        if (dms.TB && token === dms.TB) {
+                            capture(out, 'inject(TB)');
+                        } else if (looksLikeService(out)) {
+                            capture(out, 'inject(shape)');
+                        }
+                    } catch (e) {}
+                    return out;
+                };
+                wrapped.__aistudio_tap = true;
+                dms.n = wrapped;
+            }
+        } catch (e) {}
+
+        // 旧构建兼容：TB.prototype.initialize / getMetadata 上接 this
+        try {
+            const proto = (dms.TB && dms.TB.prototype) || {};
+            for (const method of ['initialize', 'getMetadata']) {
+                const orig = proto[method];
+                if (typeof orig !== 'function' || orig.__aistudio_tap) continue;
+                const wrapped = function () {
+                    capture(this, 'TB.' + method);
+                    return orig.apply(this, arguments);
+                };
+                wrapped.__aistudio_tap = true;
+                proto[method] = wrapped;
+            }
+        } catch (e) {}
+        return true;
+    };
+
+    // 每进一次页面（含 install 重试）都尝试装一次探针；已在则不重复
+    installServiceTap();
 
     const dms = window.default_MakerSuite;
     if (!dms) return 'no_default_MakerSuite';
@@ -19,14 +130,16 @@
     };
 
     // Auto-detect snapshot function via multi-variant feature matching
-    let snapKey = null;
-    for (const k of Object.keys(dms)) {
-        try {
-            if (isSnapCandidate(dms[k])) {
-                snapKey = k;
-                break;
-            }
-        } catch(e) {}
+    let snapKey = window.__AISTUDIO__.snapKey || null;
+    if (!snapKey) {
+        for (const k of Object.keys(dms)) {
+            try {
+                if (isSnapCandidate(dms[k])) {
+                    snapKey = k;
+                    break;
+                }
+            } catch(e) {}
+        }
     }
     if (!snapKey) return 'no_snapshot_fn';
 
@@ -56,6 +169,9 @@
                 const req = args[0];
                 const init = args[1] || {};
                 const url = typeof req === 'string' ? req : (req && req.url ? req.url : '');
+                if (isRpcUrl(url)) {
+                    recordHeaders(init.headers || (req && req.headers));
+                }
                 if (url.includes('SavePrompt') || url.includes('CreatePrompt')) {
                     return (async () => new Response(JSON.stringify([]), {
                         status: 200,
@@ -131,6 +247,9 @@
         proto.send = function(body) {
             try {
                 const url = this.__aistudio_url || '';
+                if (isRpcUrl(url)) {
+                    recordHeaders(this.__aistudio_headers);
+                }
                 if (url.includes('SavePrompt') || url.includes('CreatePrompt')) {
                     setTimeout(() => { try { this.abort(); } catch(e) {} }, 0);
                     return;

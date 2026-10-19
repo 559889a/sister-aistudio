@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from aistudio_api.application.account_rotator import AccountRotator
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
+    from aistudio_api.infrastructure.gateway.client_pool import ClientPool
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -35,7 +36,8 @@ class ModelStatsItem:
 
 @dataclass
 class RuntimeState:
-    client: AIStudioClient | None = None
+    # 单浏览器路径是 AIStudioClient；pool_size>1 时是 ClientPool（同一个鸭子类型接口）
+    client: AIStudioClient | ClientPool | None = None
     browser_port: int = 9222
     account_service: AccountService | None = None
     rotator: AccountRotator | None = None

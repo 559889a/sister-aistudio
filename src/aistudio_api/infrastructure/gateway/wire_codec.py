@@ -161,13 +161,22 @@ class AistudioWireCodec:
     TIMEZONE_INDEX = TopLevelIndex.LOCATION
 
     def decode(self, raw_body: str) -> AistudioRequest:
-        body = json.loads(raw_body)
+        parsed = json.loads(raw_body)
+        if not isinstance(parsed, list):
+            raise ValueError(
+                f"wire body 必须是 JSON 数组，实际是 {type(parsed).__name__}"
+            )
+        body = list(parsed)
+        # 模板可能只是个短数组（binding 模式下的默认模板只有 model 一个元素）。
+        # 下面按固定下标取字段之前先补齐，短模板不该直接 IndexError。
+        self._ensure_len(body, self.TIMEZONE_INDEX + 1)
+        raw_gc = body[self.GENERATION_CONFIG_INDEX]
         return AistudioRequest(
             model=body[self.MODEL_INDEX],
             contents=self._decode_contents(body[self.CONTENTS_INDEX]),
             safety_settings=body[self.SAFETY_INDEX],
             generation_config=AistudioGenerationConfig(
-                list(body[self.GENERATION_CONFIG_INDEX])
+                list(raw_gc) if isinstance(raw_gc, list) else []
             ),
             snapshot=body[self.SNAPSHOT_INDEX]
             if len(body) > self.SNAPSHOT_INDEX

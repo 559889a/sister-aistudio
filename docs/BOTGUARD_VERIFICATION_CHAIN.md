@@ -107,6 +107,84 @@ sequenceDiagram
 
 ---
 
+### 2.3 引导：不需要往对话里发探针消息（binding 模式）
+
+早期实现靠「往输入框写 `say '1'` 再点 Run」，让页面自己发一次 GenerateContent，借此同时拿到
+`BotGuardService` 单例与真实请求头。这条路线有两个代价：往用户对话里塞一条假消息、烧掉一次生成配额。
+
+现在的默认引导（`botguard_bootstrap.py`）改成三步，全程不碰发送：
+
+1. **DI 探针**：`install_hooks.js` 包住 `default_MakerSuite.n`（页面自己的 Angular `inject`），
+   在每次 `inject()` 返回时按**形状**认服务（`service.A.snapshot` 是函数）；旧构建另外包
+   `TB.prototype.initialize / getMetadata`。**不能把 `dms.TB` 当前提**（2026-10-20 的构建已不导出它），
+   否则探针一次都装不上；
+2. **请求头采集**：页面自己的任意 `/$rpc/` 请求带的会话级头（`x-goog-api-key`、`x-aistudio-*`、
+   `x-goog-ext-*`）合并保留，拼进请求模板（`content-length` / `host` / `connection` 丢掉）；
+3. **探针签名**：用固定摘要签一次 proof —— 签得出来才认为这条链路可用；签不出来（连续 3 次
+   `service_unavailable`，或 35 秒预算用尽）就**自动回退**老的 `say '1'` 引导，并把模式记在会话上，
+   后续切号不再重复试探。
+
+钩子必须用 `Page.addScriptToEvaluateOnNewDocument` 在 **document-start** 装上：页面脚本先跑的话，
+Angular DI 已经造完服务单例，探针就再也接不到它了（`session.py` 在导航前调 `add_init_script`）。
+
+#### 2.3.1 实测：移植 binding 到本仓库时踩到的四个坑（2026-10-19，Windows x64 + CloakBrowser 146）
+
+真机（headless CloakBrowser 146.0.7680.177.4 + 真实账号 cookie）跑通的完整链路，四处必须一起改，
+少一处就表现为「引导看起来成功、打请求必失败」：
+
+1. **binding 引导成功后必须关掉 `interceptBootstrap`**（`botguard_bootstrap.try_binding_bootstrap`）。
+   那个开关是给 page_send 路线拦页面第一条 GenerateContent 用的；binding 模式没有这一步，
+   开关一直开着，于是我们自己用页面 XHR 重放 GenerateContent 时被自己的 fetch/XHR 钩子拦掉——
+   现场是 `replay failed: timeout`（XHR 被 abort、status=0），五轮重试全部失败。
+2. **`AistudioWireCodec.decode` 要容忍短模板**。binding 模板只有 `["models/xxx"]` 一个元素，
+   而 decode 按固定下标取 contents/safety/generation_config，直接 `list index out of range`。
+   现在 decode 先 `_ensure_len` 补齐，并对 generation_config 做 `None → []` 归一。
+3. **没有统计对象的新账号要按「可用」处理**（`AccountRotator.is_account_available`）。
+   原实现 `stats is None → False`，于是每个刚导入账号的**第一次**请求都会被编排器判成
+   「当前账号不可用」，触发一次强制重建会话（白白多花一次导航+引导，然后失败）。
+4. **binding 等待预算给足 35 秒**。页面冷启动时 BotGuard Wasm 要从 CDN 下载并完成握手，
+   实测第一个探针 12 秒超时、第二次（约 21 秒处）才成功；预算给 20 秒会在 VM 刚就绪前放弃。
+
+真机结果（同一台机器、同一份 cookie、headless）：引导 **3.8~9.8 秒**、`bootstrap_mode=binding`、
+`capture_via=TB.initialize`、页面头 9 个（含 `x-goog-ext-*` 与 `x-aistudio-g1-tier`）；
+`gemini-3.8-flash` 与 `gemini-4-argon` 的 `generateContent` / `streamGenerateContent` **全部 200**。
+请求结束后页面输入框 `value` 长度为 0、页面里 `ms-chat-turn` 节点数为 0 —— 也就是确实
+**没有往对话里发过任何消息**，只写过输入框。
+
+#### 2.3.2 2026-10-20：页面构建不再导出 `dms.TB`，探针改按形状认服务
+
+现场：`start.cmd` 启动两台 worker（profile `-w0`/`-w1` 都是新目录），每台都刷 4 条
+`binding 引导探针签名失败: service_unavailable`，35 秒预算用尽后各自回退 page_send ——
+每次启动白等 **35 秒 × worker 数**，还会往页面里发一条 `1` 探针。
+
+页面侧只读诊断（空 profile 与旧 `profile` 的副本都试过，结果一致）：
+
+```
+dms=1  n=1  TB=0  tap=0  box=1  hdr=9  svc=0   # 40 秒内始终抓不到服务
+dms.n(dms.TB)  ->  err:NG0203                  # inject() 不能在注入上下文外调用
+```
+
+结论：`default_MakerSuite.TB` 已经不在新构建的导出里，`installServiceTap` 里
+`typeof dms.TB !== 'function'` 直接 return false —— **旧 DI 探针在新构建上永远装不上**，
+`service` 只能等页面自己发消息触发 snapshot 时才被包装器顺手接住（也就是 page_send 兜底能工作、
+binding 模式必失败的原因）。
+
+修复（`install_hooks.js`）：只要求 `dms.n`；包 `inject()` 后对**返回值**做形状匹配
+（`obj.A` 是对象且 `obj.A.snapshot` 是函数即认为是 BotGuardService），`capture_via=inject(shape)`；
+`TB.prototype` 包装保留给旧构建。另加 `SERVICE_UNAVAILABLE_BAIL = 3`：连续 3 次
+`service_unavailable` 直接回退，不再等满 35 秒（防以后再改构建时又白等）。
+
+真机验证（2026-10-20 04:2x，headless，空 profile）：
+
+- `bootstrap_mode=binding`、`capture_via=inject(shape)`、**引导 4.2 秒**、页面头 7 个；
+- 300KB binding 的 proof 生成 **0.68 秒**（`snapshot=1512 chars`、`box=synced`）；
+- 全程没有点发送 / 按 Enter，输入框在验证后清空。
+
+顺带排掉一个猜测：把 300KB binding 写进输入框后，页面主线程 RTT 仍为 3~65ms（60 秒观测无 >1s
+的卡顿），所以「写 binding 把页面冻住、导致请求迟迟发不出去」不成立。
+
+---
+
 ## 3. 阶段二：WAA 挑战握手与 Wasm 运行时加载
 
 在 `BotGuardService.initialize()` 中，前端与 Google WAA 服务完成握手：
@@ -233,6 +311,42 @@ _.l(requestProto, 5, t);             // 3. 将 Token 注入 Protobuf 字段 5 (W
    - 使用握手会话秘钥对 `contentHash` 与环境特征进行加密并计算 HMAC 签名；
    - 生成以 `!` 开头、长度约为 1500~1650 字符的 Base64 快照 Token（例如 `!dXaldhLNAAa1dSU5lXVCmOax...`）。
 
+### 4.3 输入框 binding：WAA proof 与输入框状态强绑定（2026-10-19 实测）
+
+把 `sha256(contents)` 交给快照函数**并不足以**让上游认这份 proof —— 签名器还要求页面的
+提示词输入框里此刻就是那段内容。机制来源是参考实现
+`Catiecli Playground Executor 2.4.9` 与同作者的 `gemini2api` 执行器 `v2.0.0`，两边都是同一句话：
+
+> binding 写入输入框（WAA proof 与输入框状态强绑定）
+
+省掉这一步的后果不是报错，而是两种更难查的形态：
+
+| 现象 | 说明 |
+|---|---|
+| `403 [7] The caller does not have permission` | proof 签出来了，但上游判定与输入框状态不一致 |
+| `snapshot()` 静默挂死 | 页面 zone 冻结/状态不一致时该 Promise 可能永不回调（实测挂过 5 分钟） |
+
+实现（`src/aistudio_api/infrastructure/browser/js/snapshot_generate.js`）：
+
+1. **写值走原生 setter**：`Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(box, binding)`。
+   直接赋 `.value` 时 Angular 的受控组件收不到变更。
+2. **补事件**：派发 `InputEvent('input', { inputType: 'insertText', data: binding })` 与 `Event('change')`。
+3. **确认页面认了**：`box.value === binding` 才算同步成功；8 秒预算内每 150ms 重试，
+   每两次重试做一次**焦点扰动**（`focus → focusin → blur → focusout`）——长时间后台运行的页面，
+   Angular 的合成事件不再触发变更检测，表现为「页面卡住，用户手动点一下输入框才恢复」。
+4. **binding 就是哈希原文**：`digest = sha256(binding)`。写进输入框的字符串与算摘要的原文必须
+   逐字一致，否则服务端的 HMAC 比对不过。
+5. **超时与重试**：`snapshot()` 可能永不 resolve，所以用 20s / 30s / 30s 三轮硬超时，
+   每轮失败先做焦点扰动、再补一次 binding，然后重签。
+6. **生命周期**：写值 → 签名 → 发请求 → 请求结束清空（`js/clear_binding.js`）。
+   **只写值与清值：绝不点发送、绝不按 Enter、绝不替页面发任何消息。**
+
+> 输入框不存在（停在 dashboard / apps 页）时不做 binding、照旧签名；写入失败（框架锁值）
+> 也只在日志/状态里如实记 `sync_failed`，不因此让请求失败——但那样可能换来上面的 403，
+> 所以 `prompt_state.js` 把「输入框在不在、页面可见/焦点、服务与公共头就绪没」一起报出来。
+
+---
+
 ## 5. 阶段四：Wire 协议组包与浏览器 Fetch/XHR 重放
 
 ```json
@@ -334,6 +448,10 @@ flowchart TD
 1. **时效性与内容绑定**：快照 Token 内包含时间戳与挑战 Nonce，且与特定请求的内容哈希强绑定。内容修改后需重新计算哈希并生成新快照。
 2. **后台休眠与保活**：当标签页处于后台时，虚拟机可能进入休眠。页面重新切回前台时，`visibilitychange` 事件会触发恢复（`service.A.CE()`）；若已失效则重新执行握手。
 3. **多账号身份隔离**：每个子账号（`u/0`, `u/1`...）对应独立的身份上下文与 Wasm 实例，切换账号需通过 `/u/{auth_user}/` 专属路由切换并加载对应账号上下文。
+4. **输入框 binding 的生命周期**：proof 与输入框状态强绑定（见 §4.3），所以「写 binding → 签名 → 发请求」这一小段必须独占输入框：
+   `generate_snapshot` 用 `_snapshot_lock` 串行化签名窗口，请求结束在 `finally` 里清空输入框。
+   并发请求不会互相覆盖（覆盖只会发生在签名窗口内，那正是锁保护的范围），但**别把输入框里的内容当成请求参数**——
+   它只服务于 proof，请求内容始终是 wire body 里的 `contents`。
 
 ## 8. 核心报文结构参考
 

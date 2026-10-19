@@ -42,11 +42,20 @@ async def test_get_single_model_returns_model_object(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_endpoint_is_removed(monkeypatch):
+async def test_v1_models_endpoint_returns_openai_shape(monkeypatch):
+    """`/v1/models` 现在是 OpenAI 兼容端口（与 /v1beta/models 复用同一份模型数据）。"""
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/v1/models")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        data = response.json()
+        assert data["object"] == "list"
+        assert isinstance(data["data"], list)
+        assert len(data["data"]) > 0
+        first = data["data"][0]
+        assert not first["id"].startswith("models/")
+        assert first["object"] == "model"
+        assert first["owned_by"] == "google"
 
 
 @pytest.mark.asyncio

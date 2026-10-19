@@ -258,3 +258,40 @@ async def test_cdp_client_connect_page_success_and_prune():
         ):
             page = await client.connect_page(block_assets=True)
             assert page.target_id == "t1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_s", [None, 0])
+async def test_cdp_send_without_deadline_waits_for_response(timeout_s):
+    """timeout_s=None/0 = 不设总截止：生成等多久都不会被 CDP 自己掐断。"""
+    conn = CDPConnection("ws://127.0.0.1:9222/devtools/page/test")
+    conn.ws = AsyncMock()
+    conn.ws.send = AsyncMock()
+    conn.set_liveness_checker(lambda: True)
+
+    async def resolve_later():
+        while not conn._futures:
+            await asyncio.sleep(0.01)
+        # 比「旧实现里 0 秒截止」长得多：现在必须继续等
+        await asyncio.sleep(0.1)
+        fut = next(iter(conn._futures.values()))
+        if not fut.done():
+            fut.set_result({"result": {"value": 1}})
+
+    resolver = asyncio.create_task(resolve_later())
+    result = await conn.send("Runtime.evaluate", {"expression": "1"}, timeout_s=timeout_s)
+    await resolver
+
+    assert result == {"result": {"value": 1}}
+
+
+@pytest.mark.asyncio
+async def test_cdp_send_positive_timeout_still_times_out():
+    """基础设施超时保留：显式给正数截止时仍然按截止失败。"""
+    conn = CDPConnection("ws://127.0.0.1:9222/devtools/page/test")
+    conn.ws = AsyncMock()
+    conn.ws.send = AsyncMock()
+    conn.set_liveness_checker(lambda: True)
+
+    with pytest.raises(TimeoutError, match=r"timed out after 0\.05s"):
+        await conn.send("Runtime.evaluate", {"expression": "1"}, timeout_s=0.05)

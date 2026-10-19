@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.account.cookie_parser import (
     calculate_sapisid_hash,
     get_tier_header_value,
@@ -27,6 +28,25 @@ if TYPE_CHECKING:
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("transport")
+
+
+async def _evaluate_transport(
+    page: CDPPage,
+    expression: str,
+    args: object,
+    *,
+    timeout_s: float | None,
+    operation: str,
+) -> object:
+    """在页面里执行传输脚本；CDP/JS 异常统一归到 BrowserTransportError。
+
+    `page.evaluate` 抛的是 RuntimeError/TimeoutError（CDP 命令超时、JS 异常、页面
+    已关闭）；这些都属于「请求没拿到响应」的传输层失败，不能当成网关 500。
+    """
+    try:
+        return await page.evaluate(expression, args, timeout_s=timeout_s)
+    except (RuntimeError, TimeoutError) as exc:
+        raise BrowserTransportError(f"{operation} failed: {exc}") from exc
 
 
 def _get_active_auth_cookies() -> dict[str, str] | None:
@@ -185,12 +205,14 @@ class XHRStreamTransport:
         url: str,
         headers: dict[str, str],
         body: str,
-        timeout_ms: int,
         auth_user: str = "0",
         tier: str | None = None,
     ) -> tuple[int, bytes]:
-        """Replay request via XHR inside the browser page context."""
-        timeout_s = timeout_ms / 1000
+        """Replay request via XHR inside the browser page context.
+
+        不设生成等待时长上限：整段非流式生成可能跑几分钟（用户明确要求不要看门狗），
+        只保留 CDP 的 liveness 检查（浏览器进程死了立刻失败）。
+        """
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
@@ -198,15 +220,18 @@ class XHRStreamTransport:
             url=url,
             headers=clean_headers,
             body=body,
-            timeout_s=timeout_s,
         )
 
-        result = await page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=timeout_s + 5.0)
+        result = await _evaluate_transport(
+            page, HOOKED_REQUEST_JS, args, timeout_s=None, operation="replay"
+        )
         res_dict: dict[str, object] = result if isinstance(result, dict) else {}
         status = int(str(res_dict.get("status") or 0))
         raw_text = str(res_dict.get("body") or "")
         if status == 0:
-            raise RuntimeError(f"replay failed: {raw_text}")
+            # 页面里的网络层失败（Failed to fetch / network error / aborted）：
+            # 不是上游 HTTP 错误，交给 API 层清模板后重试（未吐数据时）。
+            raise BrowserTransportError(f"replay failed: {raw_text}")
         return status, raw_text.encode("utf-8")
 
     async def send_streaming_request(
@@ -216,15 +241,15 @@ class XHRStreamTransport:
         url: str,
         headers: dict[str, str],
         body: str,
-        timeout_ms: int,
         auth_user: str = "0",
         tier: str | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
         """Send a streaming request, yielding ('status', int) and ('chunk', bytes) events.
 
-        Guarantees V8 window cleanup on termination/timeout and prevents silent truncation.
+        **没有生成等待时长上限**：循环里的 1 秒 wait_for 只用来周期检查页面是否还活着，
+        超时本身绝不会让请求失败（用户原话：我们不要任何看门狗）。终止只有两种：
+        页面关闭/连接断开（RuntimeError）、或上游给出 done/aborted/error 事件。
         """
-        timeout_s = timeout_ms / 1000
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user, tier=tier
         )
@@ -248,30 +273,29 @@ class XHRStreamTransport:
             url=url,
             headers=clean_headers,
             body=body,
-            timeout_s=timeout_s,
             rid=rid,
         )
-        await page.evaluate(STREAMING_INIT_JS, init_args)
+        await _evaluate_transport(
+            page,
+            STREAMING_INIT_JS,
+            init_args,
+            timeout_s=30.0,
+            operation="streaming init",
+        )
 
-        deadline = asyncio.get_running_loop().time() + timeout_s
         status_sent = False
         is_terminal = False
 
         try:
             while not is_terminal:
                 if page.is_closed() is True:
-                    raise RuntimeError("Browser page closed during streaming")
-                now = asyncio.get_running_loop().time()
-                remaining = deadline - now
-                if remaining <= 0:
-                    break
-
-                step_timeout = min(remaining, 1.0)
+                    raise BrowserTransportError("Browser page closed during streaming")
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=step_timeout)
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
                 except TimeoutError:
+                    # 只查 liveness，绝不能因为时间到期而失败
                     if page.is_closed() is True:
-                        raise RuntimeError(
+                        raise BrowserTransportError(
                             "Browser page closed during streaming"
                         ) from None
                     continue
@@ -280,15 +304,13 @@ class XHRStreamTransport:
                     status = int(str(event.get("status") or 0))
                     yield ("status", status)
                     status_sent = True
-                    deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "chunk":
                     text = str(event.get("text") or "")
                     if text:
                         yield ("chunk", text.encode("utf-8"))
-                        deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
-                    raise RuntimeError(f"streaming request failed: {message}")
+                    raise BrowserTransportError(f"streaming request failed: {message}")
                 elif etype in ("done", "aborted"):
                     while not queue.empty():
                         try:
@@ -302,9 +324,10 @@ class XHRStreamTransport:
                     is_terminal = True
                     break
             if not status_sent:
-                raise RuntimeError("streaming request timeout: no response status")
-            if not is_terminal:
-                raise TimeoutError("streaming response timed out before completion")
+                # 与时间无关：上游没有给出任何 status 就结束了（页面脚本异常等）
+                raise BrowserTransportError(
+                    "streaming request ended before response status"
+                )
         finally:
             self._queues.pop(rid, None)
             with suppress(Exception):

@@ -16,22 +16,27 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-_UNIFIED_LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
-_UNIFIED_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+_UNIFIED_LOG_FORMAT = "[%(levelname)s] %(asctime)s [aistudio-api] %(message)s"
+_UNIFIED_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 # ANSI Color codes for TTY output
 _COLORS = {
     "DEBUG": "\033[36m",  # Cyan
     "INFO": "\033[32m",  # Green
-    "WARNING": "\033[33m",  # Yellow
+    "WARN": "\033[33m",  # Yellow
     "ERROR": "\033[31m",  # Red
     "CRITICAL": "\033[1;31m",  # Bold Red
 }
 _RESET = "\033[0m"
+_LEVEL_ALIASES = {"WARNING": "WARN"}
 
 
 class UnifiedFormatter(logging.Formatter):
-    """Unified formatter supporting optional ANSI colors on TTY streams."""
+    """统一日志格式：`[INFO] 2026-10-19T10:54:15.499Z [aistudio-api] ...`。
+
+    与主项目（gemini2api）的输出风格对齐：UTC ISO 时间戳（毫秒 + Z）、短级别名
+    （WARNING → WARN）、固定的产品 tag。ANSI 颜色只在 TTY 上启用。
+    """
 
     def __init__(self, use_color: bool | None = None) -> None:
         super().__init__(fmt=_UNIFIED_LOG_FORMAT, datefmt=_UNIFIED_DATE_FORMAT)
@@ -39,13 +44,19 @@ class UnifiedFormatter(logging.Formatter):
             use_color = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
         self.use_color = use_color
 
+    def formatTime(
+        self, record: logging.LogRecord, _datefmt: str | None = None
+    ) -> str:
+        ts = datetime.fromtimestamp(record.created, tz=UTC)
+        return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}Z"
+
     def format(self, record: logging.LogRecord) -> str:
         orig_levelname = record.levelname
-        if self.use_color and record.levelname in _COLORS:
-            color = _COLORS[record.levelname]
-            record.levelname = f"{color}{record.levelname}{_RESET}"
+        short = _LEVEL_ALIASES.get(orig_levelname, orig_levelname)
+        if self.use_color and short in _COLORS:
+            record.levelname = f"{_COLORS[short]}{short}{_RESET}"
         else:
-            record.levelname = record.levelname
+            record.levelname = short
 
         try:
             return super().format(record)
@@ -245,6 +256,12 @@ def set_log_level(level: str | int) -> None:
 
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(logger_name).setLevel(numeric_level)
+
+    # 第三方传输库的逐请求日志（CDP 探活、cookie 刷新）与 LLM 请求无关：
+    # INFO 级别下静音，只有 DEBUG 才放出来。
+    noisy_level = logging.DEBUG if numeric_level <= logging.DEBUG else logging.WARNING
+    for logger_name in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(logger_name).setLevel(noisy_level)
 
 
 def setup_logging(level: str | int = "INFO") -> None:

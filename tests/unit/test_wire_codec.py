@@ -18,6 +18,23 @@ from aistudio_api.infrastructure.gateway.wire_types import (
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
+def test_decode_short_template_body_pads_missing_indexes():
+    """binding 模式的默认模板只有 model 一个元素：decode 必须补齐下标而不是 IndexError。"""
+    codec = AistudioWireCodec()
+    request = codec.decode('["models/gemini-3.8-flash"]')
+    assert request.model == "models/gemini-3.8-flash"
+    assert request.contents == []
+    assert request.snapshot is None
+    assert request.tools is None
+    assert request.location is None
+
+    # 补齐之后仍能正常编码出可用的 wire body（没工具/时区时尾部 None 会被裁掉，这是既有行为）
+    body = json.loads(codec.encode(request))
+    assert len(body) >= AistudioWireCodec.CACHED_CONTENT_INDEX + 1
+    assert body[AistudioWireCodec.MODEL_INDEX] == "models/gemini-3.8-flash"
+    assert body[AistudioWireCodec.REQUEST_FLAG_INDEX] == 1
+
+
 def test_modify_body_updates_generation_config_and_prompt():
     original = '["models/original",[[[[null,"old"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"!snap",null,null]'
     rewritten = modify_body(

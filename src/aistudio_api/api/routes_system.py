@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING
 
 import yaml
@@ -190,16 +189,12 @@ async def force_next_account(
     }
 
 
-# ========== 系统与模型配置 API ==========
-
-
-class ConfigYamlUpdateRequest(BaseModel):
-    yaml_content: str
+# ========== 系统配置 API ==========
 
 
 @protected_router.get("/config")
 async def get_system_config() -> dict[str, object]:
-    """获取系统运行配置与 config.yaml 内容。"""
+    """获取系统运行配置（服务状态、鉴权与日志转储）。"""
     from aistudio_api.config import settings
     from aistudio_api.infrastructure.utils.logger import (
         get_dump_dir,
@@ -209,64 +204,18 @@ async def get_system_config() -> dict[str, object]:
         is_dump_to_file_enabled,
     )
 
-    config_yaml_path = _resolve_config_path(None)
-    yaml_content = ""
-    if config_yaml_path.exists():
-        with contextlib.suppress(Exception):
-            yaml_content = config_yaml_path.read_text(encoding="utf-8")
     return {
         "port": settings.port,
         "browser_port": settings.browser_port,
         "browser_headless": settings.browser_headless,
         "proxy_configured": bool(settings.proxy_url),
         "auth_enabled": settings.auth_enabled,
-        "timeout_stream": settings.timeout_stream,
-        "yaml_content": yaml_content,
         "log_level": get_log_level(),
         "dump_requests": is_dump_requests_enabled(),
         "debug_env_active": is_debug_env_active(),
         "dump_to_file": is_dump_to_file_enabled(),
         "dump_dir": str(get_dump_dir()),
     }
-
-
-@protected_router.put("/config/yaml")
-async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
-    """更新 config.yaml 文件内容并热重载默认配置。"""
-
-    try:
-        parsed = yaml.safe_load(req.yaml_content)
-        if parsed is not None and not isinstance(parsed, dict):
-            raise HTTPException(400, detail="YAML 顶层必须为字典结构")
-    except yaml.YAMLError as e:
-        raise HTTPException(400, detail=f"YAML 语法格式错误: {e}") from e
-    config_yaml_path = _resolve_config_path(None)
-    try:
-        config_yaml_path.write_text(req.yaml_content, encoding="utf-8")
-        invalidate_config_cache()
-
-        if isinstance(parsed, dict) and "logging" in parsed:
-            raw_logging = parsed["logging"]
-            if isinstance(raw_logging, dict):
-                from aistudio_api.infrastructure.utils.logger import (
-                    set_dump_dir,
-                    set_dump_requests,
-                    set_dump_to_file,
-                    set_log_level,
-                )
-
-                if "level" in raw_logging:
-                    set_log_level(str(raw_logging["level"]))
-                if "dump_requests" in raw_logging:
-                    set_dump_requests(bool(raw_logging["dump_requests"]))
-                if "dump_to_file" in raw_logging:
-                    set_dump_to_file(bool(raw_logging["dump_to_file"]))
-                if "dump_dir" in raw_logging:
-                    set_dump_dir(str(raw_logging["dump_dir"]))
-        logger.info("配置文件 config.yaml 已更新并重新加载")
-        return {"ok": True, "message": "配置已保存并重载"}
-    except Exception as e:
-        raise HTTPException(500, detail=f"写入配置文件失败: {e}") from e
 
 
 class LoggingConfigRequest(BaseModel):
@@ -502,3 +451,32 @@ async def update_api_key_name(
     logger.info("API Key 备注名已更新: %s -> %s", key_value[:8] + "...", new_name)
 
     return updated_item
+
+
+# ─────────────────────────── 运行期设置 ───────────────────────────
+# 与主项目 build2api 的「参数覆写 / 预填充兼容 / 工具调用 bypass」三组对齐。
+# 落在 data/settings.json（不是 config.yaml）：改完立即生效，不用重载配置。
+
+
+class SettingsPatchRequest(BaseModel):
+    patch: dict[str, object]
+
+
+@protected_router.get("/settings")
+async def get_runtime_settings() -> dict[str, object]:
+    """返回设置 schema + 当前值 + 持久化路径（WebUI 直接照着渲染）。"""
+    from aistudio_api.application.runtime_settings import runtime_settings
+
+    return runtime_settings.schema()
+
+
+@protected_router.put("/settings")
+async def update_runtime_settings(req: SettingsPatchRequest) -> dict[str, object]:
+    """局部更新运行期设置；任何一项非法则整体拒绝。"""
+    from aistudio_api.application.runtime_settings import runtime_settings
+
+    try:
+        runtime_settings.update(req.patch)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    return runtime_settings.schema()

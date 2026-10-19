@@ -52,7 +52,13 @@
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
 | **内置搜索与工具** | 支持 Google Search 联网搜索、Google Maps、代码执行沙箱等官方扩展能力 |
 | **轻量 CDP 驱动** | 基于纯 Python 异步 WebSocket 直连 Chrome DevTools Protocol，无需 Node.js、Playwright 或 Selenium |
-| **Web 管理面板** | 提供 Web 管理控制台，支持账号管理（文本与 JSON 批量导入）、调用量监控、在线编辑与热重载 `config.yaml` |
+| **无消息引导（WAA binding）** | 默认不往对话里发探针消息：DI 探针接住 BotGuardService、复用页面自身请求头，签名前把内容写入提示词输入框（binding，只写值不发送）；探针签名失败时自动回退 `say '1'` 引导 |
+| **OpenAI 兼容端口** | 除 Gemini 原生 `/v1beta/...` 外，新增 `POST /v1/chat/completions`（非流式 + SSE，工具调用、`reasoning_content`、`usage`）与 `GET /v1/models`，与 Gemini 端口共用同一条 normalize→capture→replay→parse 链路 |
+| **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 思考等级 / 返回思考内容 / 丢弃客户端 max_tokens / 采样参数）、预填充兼容（含思维链闭合守卫）、工具调用 bypass（含思考/工具签名哨兵），落在 `data/settings.json`，改完立即生效、无需重启 |
+| **工具调用抗截断 bypass** | 让模型把正文写进一次合成函数调用的 `content` 参数，网关再还原成普通正文流；用于绕开只扫描正文流的外部审查截断。非流式/流式都支持，`required` 模式没调工具会报错 |
+| **流式可靠性与心跳** | 没有「单次生成最长等待 / 流式空闲」看门狗，长回答不会被网关掐断；流式响应从请求开始每 1 秒发一次 SSE 心跳（OpenAI 空 delta chunk / Gemini 原生 `: ping` 注释行），bypass 首块前的长静默也不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文；页面 fetch 网络失败（如 `Failed to fetch`）在还没吐正文时自动清模板重试，耗尽后明确报 502 |
+| **签名哨兵** | 发往上游的思考签名 / 工具签名默认换成官方逃生口 `skip_thought_signature_validator`，避免上游「校验后替换内容」导致的死循环 |
+| **Web 管理面板** | 提供 Web 管理控制台，支持账号管理（文本与 JSON 批量导入）、调用量监控、系统配置（日志 / API Key），以及独立的「运行期设置」页 |
 | **Android 伴侣端** | 配套 Android 原生应用（`android/`），采用 Jetpack Compose 构建，支持多 Profile 隔离登录、Bitwarden 自动填充与一键导出凭据包 |
 > [!NOTE]
 > **内存占用参考**：纯 Python 后端服务常驻内存约 35 - 45 MB；拉起单实例受控 Chromium 后总物理内存 (PSS) 约 350 - 450 MB（宿主 Linux 下约 250 - 350 MB）。Android Termux 环境建议空闲 RAM ≥ 1 GB。
@@ -179,6 +185,37 @@ uv run python3 main.py server --port 8080
 
 ---
 
+### 一键启动（start.cmd / start.sh）
+
+**Windows**：运行仓库根目录的 `start.cmd`，服务直接在当前终端**前台**跑，日志实时打在屏幕上；按 `Ctrl+C` 就停（cmd 若追问 `Terminate batch job (Y/N)?` 按 `Y`）。
+
+```bat
+start.cmd
+set PORT=8081 && start.cmd              # 换端口
+set HOST=127.0.0.1 && start.cmd         # 只本机
+set AISTUDIO_BROWSER_HEADLESS=false && start.cmd   # 有头浏览器
+```
+
+脚本会自动复用 `.venv` / `venv`（都没有就用 PATH 里的 `python`），缺依赖时按 `requirements.txt` 装一遍。
+日志只保留 LLM 请求 / 上游重试 / 错误（健康检查、面板轮询、uvicorn access 日志不再刷屏）；
+要看更细的转换细节，把 `config.yaml` 的 `logging.level` 改成 `DEBUG`。
+
+**Linux / macOS / Termux / Windows Git Bash**：`start.sh` 做同样的事（前台运行，Ctrl+C 停）：
+
+```bash
+./start.sh                      # 默认 8080 端口，无头模式
+PORT=8081 ./start.sh            # 换端口
+AISTUDIO_BROWSER_HEADLESS=false ./start.sh   # 有头启动（本机调试用）
+VENV=/path/to/existing/venv ./start.sh       # 复用已有虚拟环境
+```
+
+两个脚本的行为一致：优先用已有 `.venv` / `venv`（`VENV` 可指定）；没有就用 `uv`
+建环境（没有 uv 则 `python -m venv`）；依赖装过一次（能 import fastapi）就跳过。
+浏览器仍需事先准备好（`scripts/setup-browser.sh` / `scripts/install-browser.ps1`，
+或设置 `AISTUDIO_BROWSER_EXECUTABLE`）。
+
+---
+
 ### Docker 部署
 
 镜像已内置 CloakBrowser 运行时，支持开箱即用：
@@ -204,13 +241,14 @@ docker compose up -d
 
 ## 配置与环境变量
 
-服务启动后可访问 `http://localhost:8080` 进入 Web 控制台完成可视化管理。
+服务启动后可访问 `http://localhost:8080` 进入 Web 控制台管理账号、日志与运行期设置。
 
 ### 环境变量支持
 
 | 变量名 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | API 服务监听端口 |
+| `AISTUDIO_HOST` | string | `0.0.0.0` | 监听地址。默认对局域网/其它设备开放；只允许本机访问就设 `127.0.0.1` |
 | `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`） |
 | `AISTUDIO_PROXY` | string | `""` | 出口代理地址，支持 `http://`、`https://` 或 `socks5://` |
 | `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录（Docker 下为 `/app/data`） |
@@ -221,7 +259,8 @@ docker compose up -d
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化模型调用与 Token 统计（1=开启，0=关闭） |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号 429 冷却与调度状态（1=开启，0=关闭） |
 | `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径（Docker 内为 `/opt/cloakbrowser/chrome`） |
-| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP) |
+| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP)；池模式下第 N 台用 `端口 + N` |
+| `AISTUDIO_BROWSER_POOL_SIZE` | int | `2` | 浏览器 worker 池大小（1=单浏览器旧路径；2..4=多台负载均衡 + 失败自愈） |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否以无头模式运行 Chromium |
 | `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | 浏览器空闲自动回收超时秒数（Termux 下默认 900s，桌面端 1800s，0 为禁用） |
 | `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Termux 环境下专用的 proot-distro 容器名称 |
@@ -232,6 +271,104 @@ docker compose up -d
 | `AISTUDIO_DUMP_REQUESTS` | bool | `false` | 是否在终端转储每次 API 交互报文详情（支持 `DEBUG=1` 触发） |
 | `AISTUDIO_DUMP_FILE` | bool | `false` | 是否将请求与响应报文详情落盘保存 |
 | `AISTUDIO_DUMP_DIR` | string | `dumps/` | 报文转储保存目录 |
+| `AISTUDIO_SETTINGS_FILE` | string | `data/settings.json` | 运行期设置持久化文件（见下节「运行期设置」） |
+
+---
+
+## 运行期设置（WebUI「运行期设置」页 / `GET|PUT /settings`）
+
+和 `config.yaml` 的分工：`config.yaml` 是**启动期配置**（监听、鉴权、模型默认档案，手工编辑，改完需重启）；
+下面这些是**运行期设置**，落在 `data/settings.json`，**改完立即生效、不用重启**。
+
+| 分组 | 设置项 | 说明 |
+|---|---|---|
+| 参数覆写 | `thinkingMode` / `thinkingLevel` | 思考控制：跟随客户端 / 强制关到最低 / 强制用指定档位；档位按模型实际支持收敛（3 Pro 只有 low/high，3.8-flash 最低是 low） |
+| 参数覆写 | `includeThoughts` | 关掉后上游不再回传思维链，OpenAI 端口 `reasoning_content` 为空、Gemini 端口没有 thought part |
+| 参数覆写 | `dropMaxTokens` / `maxOutputTokens` | 丢掉客户端写死的 max_tokens / 用固定上限覆写 |
+| 参数覆写 | `temperature` / `topP` / `topK` | 留空 = 用客户端值；填了无条件覆盖（topK 收敛到 63） |
+| 预填充兼容 | `prefillEnabled` / `prefillCotGuard` / `prefillNudge` | 请求以 assistant 轮结尾时补续写指令并拼回响应；预填充停在未闭合标签时要求模型先闭合（思维链闭合守卫） |
+| 工具调用 bypass | `bypassEnabled` / `bypassMode` / `bypassMergeOutside` / `bypassInstructionPosition` / `bypassInstruction` / `bypassToolPrefix` | 让模型把正文写进一次合成函数调用，网关再还原；用 `required` 模式可在模型没调工具时直接报错排查预设 |
+| 工具调用 bypass | `sigSentinelThought` / `sigSentinelTool` | 签名哨兵：把发往上游的思考/工具签名换成官方逃生口 `skip_thought_signature_validator`（默认开） |
+
+命令行读写（与 WebUI 等价）：
+
+```bash
+curl -s http://127.0.0.1:8080/settings | jq          # schema + 当前值 + 文件路径
+curl -s -X PUT http://127.0.0.1:8080/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"patch":{"bypassEnabled":true,"thinkingMode":"console","thinkingLevel":"low"}}'
+```
+
+> [!NOTE]
+> 单轮口径：bypass 不再续写。正文最后一个 XML 标签没闭合时只会在日志里留一条
+> 「输出可能不完整」，不驱动重试。
+---
+
+## 浏览器池与自愈（默认 2 台）
+
+`AISTUDIO_BROWSER_POOL_SIZE`（默认 **2**，夹在 1..4）控制浏览器 worker 池：
+
+- **每台一台独立 Chromium**：第 N 台 CDP 端口 = `AISTUDIO_BROWSER_PORT + N`（默认 **9222 / 9223**），
+  profile 目录也按 worker 隔离（同一份 auth_file 是 `.../profile-w0`、`.../profile-w1`），
+  两台不会抢 SingletonLock；内存约 **300–500 MB/台**，机器吃紧可以设回 1。
+- **两台都接请求**：按 `(inflight, last_used)` 做 least-inflight 分发；账号按
+  `i % n` 绑定到 worker（只有 1 份 cookie 时两台共用同一份，启动日志会 WARN 一次，属预期）。
+- **失败自愈**：403/401、5xx、502、页面 fetch/XHR 传输失败都按 **worker 故障**处理——
+  后台 kill + 重启那台 Chromium，**这次请求在还没给客户端吐字节时立刻切到另一台重试**
+  （不等重启完成）。这些错误**不会给账号加冷却**（它们不是配额问题）；
+  只有 429 保留账号/模型的配额冷却；登录态失效（SessionExpiredError，真的被跳到登录页）
+  仍按账号隔离 24h。
+- 被 kill 的 worker 重启期间处于 cooling（默认 15s 不再派活），连续重启失败会冷却 60s；
+  **空闲回收（STOPPED）的那台也算备用**：下次请求或失败切换会被重新拉起（20~40s），
+  日志写 `切备用=#N（空闲休眠，将拉起）`；只有另一台也在 cooling / 重启中才会写 `切备用=否`。
+- 设为 `1` 即回到旧的单浏览器路径（行为与之前完全一致）。
+
+```bash
+# Windows 命令行临时启用两台（start.cmd 会读取这些环境变量）
+set AISTUDIO_BROWSER_POOL_SIZE=2
+start.cmd
+```
+
+> [!NOTE]
+> 真实自愈冒烟会真的重启 Chromium：日志里用 `pool: worker #0/#1` 区分两台，
+> 请求日志里有 `worker=#N` 与短 request id；验证完记得关服务（池会一起关掉两台浏览器）。
+
+---
+
+## 流式语义：什么时候是真流式，什么时候是「整段返回」
+
+网关对外**始终是 SSE**：请求开始就给 `200 text/event-stream`，上游没有事件时每 1 秒发一条心跳
+（OpenAI：空 delta chunk；Gemini 原生：`: ping`）。但**上游自己流不流，取决于请求形态**：
+
+| 场景 | 上游行为 | 客户端会看到 |
+|---|---|---|
+| 普通请求（bypass 关） | MakerSuite `GenerateContent` 逐块下发正文 | 心跳 → 正文分块到达（实测 19 块、块间隔约 0.3s） |
+| **bypass 开**（工具调用抗截断，默认开） | 模型输出的是一个**合成 functionCall**；Gemini 不分片下发函数参数，**第一帧就是整段工具调用**，在它准备好之前连 HTTP 响应头都不会到 | 心跳（可能持续数十秒到数分钟）→ 正文一次性到达 → usage / finish |
+
+所以下面这条日志**不是误判**：
+
+```
+上游 61s 无任何数据（响应头都没收到，尝试 1，已发 11033B）
+```
+
+- `11033B` 全是心跳帧（约 180B × 61 拍），正文 0 字节；
+- `响应头都没收到` 就是页面 `fetch` 还没 resolve —— 对 bypass 请求这是**预期**；
+- 这条 WARN 每 60 秒打一条直到上游返回第一帧，**只报告卡点、不中止请求**（项目没有任何
+  「生成等待时长」看门狗，这是用户明确要求）。bypass 打开时 WARN 会自动带上
+  `（bypass 函数调用整段返回，出首帧前无数据属预期）`。
+
+如果上游在第一帧之前断开（页面 `fetch` 抛 `TypeError: Failed to fetch`），网关会：
+
+1. 记一次 `BrowserTransportError`（不是 500），后台 kill + 重启这台 worker；
+2. 还有备用 worker（**包括空闲休眠、可被拉起的**）就本请求切过去重试；
+3. 没有备用才返回 502 `upstream_error`。
+
+> 真机数据（2026-10-20，同一账号，flash）：
+> 普通流式 19 块 / 块间隔 0.3s；bypass 请求 1 块，第一帧时间 = 整段生成时间
+> （小请求 7~15s；24 万 token 的 argon 请求在主项目同通道记录里见过 **462s / 576s**）。
+> 结论：**bypass 的「流式」在网关这一侧是合法的 SSE，但上游是整段返回**，不要拿心跳/静默
+> 日志当故障判据。
+
 ---
 
 ## API 调用示例
@@ -381,7 +518,7 @@ if response.function_calls:
 
 - **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
 - **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
-- **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
+- **系统设置 (Settings)**：服务状态、日志级别与请求转储、API Key 管理；运行期参数在独立的「运行期设置」页调整。
 - **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫。
 
 ---
@@ -411,6 +548,11 @@ bun x pyright
 # 执行单元测试套件
 uv run pytest
 ```
+
+> [!NOTE]
+> Windows 本地基线是 **555 passed / 8 failed**（8 条都是环境类既有失败，CI Linux 上不存在，
+> 明细见 `AGENT.md` §3.4）。交接状态、未解决问题、真机证据与诊断脚本见 **`AGENT.md` §6**；
+> 改完代码记得重启服务才生效。
 
 Android 伴侣端代码质量检查：
 

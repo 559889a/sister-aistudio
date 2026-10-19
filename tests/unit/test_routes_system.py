@@ -58,21 +58,8 @@ async def test_get_config_endpoint():
         data = resp.json()
         assert "port" in data
         assert "browser_port" in data
-        assert "yaml_content" in data
-
-
-@pytest.mark.asyncio
-async def test_update_config_yaml_validation():
-    async with _client() as client:
-        resp = await client.put(
-            "/config/yaml", json={"yaml_content": "invalid: [yaml: broken"}
-        )
-        assert resp.status_code == 400
-
-        resp_non_dict = await client.put(
-            "/config/yaml", json={"yaml_content": "- item1\n- item2"}
-        )
-        assert resp_non_dict.status_code == 400
+        assert "yaml_content" not in data
+        assert "timeout_stream" not in data
 
 
 @pytest.mark.asyncio

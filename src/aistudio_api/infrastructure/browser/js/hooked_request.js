@@ -1,11 +1,6 @@
 (args) => {
     return new Promise((resolve) => {
-        const timeoutMs = (args.timeout || 60) * 1000;
         const controller = new AbortController();
-        const timer = setTimeout(() => {
-            controller.abort();
-            resolve({status: 0, body: 'timeout'});
-        }, timeoutMs);
 
         const headers = Object.assign({}, args.headers || {});
 
@@ -16,7 +11,6 @@
             credentials: 'include',
             signal: controller.signal,
         }).then(async (response) => {
-            clearTimeout(timer);
             try {
                 const text = await response.text();
                 resolve({status: response.status, body: text});
@@ -24,9 +18,8 @@
                 resolve({status: response.status, body: ''});
             }
         }).catch((err) => {
-            clearTimeout(timer);
-            const msg = (err && err.name === 'AbortError') ? 'timeout' : 'network error';
-            resolve({status: 0, body: msg});
+            const aborted = err && err.name === 'AbortError';
+            resolve({status: 0, body: aborted ? 'aborted' : 'network error'});
         });
     });
 }

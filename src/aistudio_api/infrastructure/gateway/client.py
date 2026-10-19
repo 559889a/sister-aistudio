@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import ClassVar
 
+from aistudio_api.application.bypass import restore_non_stream
+from aistudio_api.application.prefill import rejoin as rejoin_prefill
 from aistudio_api.config import (
     DEFAULT_BROWSER_PORT,
     DEFAULT_IMAGE_MODEL,
@@ -57,10 +59,19 @@ class AIStudioClient:
         "1024x1536": ["2:3", "1K"],
     }
 
-    def __init__(self, port: int = DEFAULT_BROWSER_PORT):
+    def __init__(
+        self,
+        port: int = DEFAULT_BROWSER_PORT,
+        *,
+        auth_file: str | None = None,
+        profile_suffix: str = "",
+    ):
         self.port = port
         self._captured: CapturedRequest | None = None
-        self._session = BrowserSession(port=port)
+        # 池模式：每台 worker 用自己的 auth_file + profile 后缀（-w0/-w1），互不踩 profile
+        self._session = BrowserSession(
+            port=port, auth_file=auth_file, profile_suffix=profile_suffix
+        )
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
 
@@ -156,10 +167,23 @@ class AIStudioClient:
             force_refresh=force_refresh,
         )
 
-    async def replay(self, body: str, timeout: int = 120) -> tuple[int, bytes]:
-        return await self._replay_service.replay(
-            self._captured, body=body, timeout=timeout
-        )
+    async def replay(self, body: str) -> tuple[int, bytes]:
+        return await self._replay_service.replay(self._captured, body=body)
+
+    @staticmethod
+    def _restore_runtime_output(
+        output: ModelOutput,
+        raw_text: str,
+        captured: CapturedRequest,
+    ) -> ModelOutput:
+        """把上游响应还原成客户端该看到的样子（bypass 提取 + 预填充拼回）。"""
+        plan = captured.bypass_plan
+        if plan is not None:
+            output = restore_non_stream(output, raw_text, plan)
+        if output.candidates and captured.prefill_text:
+            candidate = output.candidates[0]
+            candidate.text = rejoin_prefill(captured.prefill_text, candidate.text)
+        return output
 
     async def stream_generate_content(
         self,
@@ -200,11 +224,15 @@ class AIStudioClient:
             )
             if not captured:
                 raise RequestError(0, "无法拦截请求")
-            async for event in self._streaming_gateway.stream_chat(
-                captured=captured,
-                model=model,
-            ):
-                yield event
+            try:
+                async for event in self._streaming_gateway.stream_chat(
+                    captured=captured,
+                    model=model,
+                ):
+                    yield event
+            finally:
+                # binding 只活这一条请求：结束就把输入框清空（不点发送、不按 Enter）
+                await self._session.clear_prompt()
 
     async def generate_content(
         self,
@@ -245,24 +273,28 @@ class AIStudioClient:
             if not captured:
                 raise RequestError(0, "无法拦截请求")
 
-            modified_body = captured.body
+            try:
+                modified_body = captured.body
 
-            status, raw = await self._replay_service.replay(
-                captured, body=modified_body
-            )
-            raw_text = raw.decode("utf-8", errors="replace")
-            self._dump_raw_exchange(
-                kind="generate_content",
-                model=model,
-                capture_prompt=capture_prompt,
-                modified_body=modified_body,
-                raw_response=raw_text,
-            )
-            if status != 200:
-                raise classify_error(status, raw_text)
-            output = parse_text_output(raw_text)
-            output.model = model
-            return output
+                status, raw = await self._replay_service.replay(
+                    captured, body=modified_body
+                )
+                raw_text = raw.decode("utf-8", errors="replace")
+                self._dump_raw_exchange(
+                    kind="generate_content",
+                    model=model,
+                    capture_prompt=capture_prompt,
+                    modified_body=modified_body,
+                    raw_response=raw_text,
+                )
+                if status != 200:
+                    raise classify_error(status, raw_text)
+                output = parse_text_output(raw_text)
+                output.model = model
+                return self._restore_runtime_output(output, raw_text, captured)
+            finally:
+                # binding 只活这一条请求：结束就把输入框清空（不点发送、不按 Enter）
+                await self._session.clear_prompt()
 
     @classmethod
     def resolve_image_size(cls, size: str) -> list[str] | None:
@@ -324,35 +356,40 @@ class AIStudioClient:
             if not captured:
                 raise RequestError(0, "无法拦截请求")
 
-            modified_body = captured.body
-            status, raw = await self._replay_service.replay(
-                captured, body=modified_body, timeout=120
-            )
-            raw_text = raw.decode("utf-8", errors="replace")
-            self._dump_raw_exchange(
-                kind="generate_image",
-                model=model,
-                capture_prompt=prompt,
-                modified_body=modified_body,
-                raw_response=raw_text,
-            )
-            if status != 200:
-                raise classify_error(status, raw_text)
-            output = parse_image_output(raw_text)
-            output.model = model
-
-            if output.images and save_path:
-                img = output.images[0]
-                ext = "jpg" if "jpeg" in img.mime else "png"
-                path = (
-                    Path(save_path)
-                    if save_path.endswith(f".{ext}")
-                    else Path(f"{save_path}.{ext}")
+            try:
+                modified_body = captured.body
+                status, raw = await self._replay_service.replay(
+                    captured, body=modified_body
                 )
-                path.write_bytes(img.data)
-                logger.info("图片已保存: %s (%s bytes)", path, img.size)
+                raw_text = raw.decode("utf-8", errors="replace")
+                self._dump_raw_exchange(
+                    kind="generate_image",
+                    model=model,
+                    capture_prompt=prompt,
+                    modified_body=modified_body,
+                    raw_response=raw_text,
+                )
+                if status != 200:
+                    raise classify_error(status, raw_text)
+                output = parse_image_output(raw_text)
+                output.model = model
+                output = self._restore_runtime_output(output, raw_text, captured)
 
-            return output
+                if output.images and save_path:
+                    img = output.images[0]
+                    ext = "jpg" if "jpeg" in img.mime else "png"
+                    path = (
+                        Path(save_path)
+                        if save_path.endswith(f".{ext}")
+                        else Path(f"{save_path}.{ext}")
+                    )
+                    path.write_bytes(img.data)
+                    logger.info("图片已保存: %s (%s bytes)", path, img.size)
+
+                return output
+            finally:
+                # binding 只活这一条请求：结束就把输入框清空（不点发送、不按 Enter）
+                await self._session.clear_prompt()
 
 
 __all__ = ["AIStudioClient", "CapturedRequest"]

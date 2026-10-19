@@ -198,9 +198,13 @@ class CDPConnection:
         self,
         method: str,
         params: dict[str, object] | None = None,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = 30.0,
     ) -> dict[str, object]:
-        """Send a JSON-RPC command over CDP and await result."""
+        """Send a JSON-RPC command over CDP and await result.
+
+        ``timeout_s=None`` / ``<=0`` = 不设总截止（整段生成可能跑几分钟），
+        内部仍每 0.2s 查一次浏览器 liveness，进程死了立刻失败而不是干等。
+        """
         if not self.ws or self._closed:
             raise RuntimeError("CDP connection is not open")
 
@@ -227,24 +231,30 @@ class CDPConnection:
             self._futures.pop(req_id, None)
             raise RuntimeError(f"CDP connection closed: {e}") from e
 
+        no_deadline = timeout_s is None or timeout_s <= 0
         try:
             if self._liveness_checker is None:
+                if no_deadline:
+                    return await fut
                 return await asyncio.wait_for(fut, timeout=timeout_s)
 
-            deadline = loop.time() + timeout_s
+            deadline = loop.time() + (timeout_s or 0.0)
             while True:
                 if not self._liveness_checker():
                     self.fail_pending_futures(RuntimeError("Browser process has died"))
                     raise RuntimeError(
                         f"Browser process died while awaiting CDP command {method}"
                     )
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    self._futures.pop(req_id, None)
-                    raise TimeoutError(
-                        f"CDP command {method} timed out after {timeout_s}s"
-                    )
-                step_timeout = min(remaining, 0.2)
+                if no_deadline:
+                    step_timeout = 0.2
+                else:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        self._futures.pop(req_id, None)
+                        raise TimeoutError(
+                            f"CDP command {method} timed out after {timeout_s}s"
+                        )
+                    step_timeout = min(remaining, 0.2)
                 try:
                     return await asyncio.wait_for(
                         asyncio.shield(fut), timeout=step_timeout
@@ -391,6 +401,19 @@ class CDPPage:
         """Expose a global function in page JS that dispatches Runtime.bindingCalled events."""
         await self.cdp.send("Runtime.addBinding", {"name": name})
 
+    async def add_init_script(self, source: str) -> str:
+        """Inject a script evaluated at document-start of every future navigation.
+
+        Page.enable 之后调用；返回 CDP 分配的 script identifier（可用于移除）。
+        用来把 WAA/BotGuard 探针装到页面脚本之前 —— 页面加载后再注入会错过
+        Angular DI 的实例化时机，服务引用就永远抓不到。
+        """
+        res = await self.cdp.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": source},
+        )
+        return str(res.get("identifier") or "")
+
     def on_binding(
         self, name: str, callback: Callable[[str], object]
     ) -> Callable[[], None]:
@@ -409,9 +432,12 @@ class CDPPage:
         args: object = None,
         await_promise: bool = True,
         return_by_value: bool = True,
-        timeout_s: float = 30.0,
+        timeout_s: float | None = 30.0,
     ) -> object:
-        """Evaluate a JS expression or function in the page's main world."""
+        """Evaluate a JS expression or function in the page's main world.
+
+        ``timeout_s=None`` / ``<=0`` = 不设总截止（非流式整段生成就靠它等）。
+        """
         expr = expression.strip()
         if expr.startswith("mw:"):
             expr = expr[3:].strip()

@@ -17,11 +17,15 @@ from aistudio_api.infrastructure.browser.browser_engine import (
 )
 from aistudio_api.infrastructure.browser.cdp_client import CDPClient, CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
+    CLEAR_BINDING_JS,
     DOM_GC_CLEANUP_JS,
     SNAPSHOT_GENERATE_JS,
+    build_document_start_hooks_js,
+    build_snapshot_args,
 )
 from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
     BOTGUARD_BOOTSTRAP_PROMPT,
+    DEFAULT_BOOTSTRAP_TEMPLATE,
     bootstrap_botguard_and_template,
 )
 from aistudio_api.infrastructure.gateway.session_auth import (
@@ -51,28 +55,39 @@ log = get_logger("session")
 _is_login_page_url = is_login_page_url
 _is_aistudio_page_url = is_aistudio_page_url
 
-DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
-    "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-    "headers": {
-        "Content-Type": "application/json+protobuf",
-        "X-User-Agent": "grpc-web-javascript/0.1",
-        "X-Goog-Api-Key": "AIzaSyDdP816MREB3SkjZO04QXbjsigfcI0GWOs",
-        "X-Goog-AuthUser": "0",
-        "Referer": "https://aistudio.google.com/",
-    },
-    "body": '["models/gemini-3.7-flash"]',
-}
+# 请求模板的默认值搬到了 botguard_bootstrap（binding 引导也要用它拼模板），
+# 这里只做转出，保持 `from ...gateway.session import DEFAULT_BOOTSTRAP_TEMPLATE` 可用。
+
+# 快照调用在页面侧自带 20s/30s/30s 三轮重试 + binding 同步（8s/轮），Python 侧给它留足余量
+SNAPSHOT_EVAL_TIMEOUT_S = 100.0
+
+
+def _suffixed_profile_dir(auth_file: str | None, profile_suffix: str) -> str | None:
+    """账号对应的 Chromium profile 目录；池模式下加 -w0/-w1 后缀隔离。
+
+    两台浏览器共用同一个 profile 目录会直接冲突（SingletonLock），所以同一份
+    auth_file 也必须按 worker 分目录：`.../profile` → `.../profile-w0`。
+    """
+    base = derive_profile_dir(auth_file)
+    if not base:
+        return None
+    return f"{base}{profile_suffix}" if profile_suffix else base
 
 
 class BrowserSession:
     """Coordinates browser lifecycle, readiness gate, and blue-green tab transitions."""
 
-    def __init__(self, port: int):
+    def __init__(
+        self, port: int, *, auth_file: str | None = None, profile_suffix: str = ""
+    ):
         self.port = port
-        self._auth_file: str | None = settings.auth_file or None
+        self._profile_suffix = profile_suffix or ""
+        self._auth_file: str | None = (
+            auth_file if auth_file is not None else (settings.auth_file or None)
+        )
         self._auth_user: str | None = None
         self._tier: str | None = None
-        self._profile_dir = derive_profile_dir(self._auth_file)
+        self._profile_dir = _suffixed_profile_dir(self._auth_file, self._profile_suffix)
         self._proc: ChromiumProcess | None = None
         self._cdp_client: CDPClient | None = None
 
@@ -85,6 +100,12 @@ class BrowserSession:
         self._in_flight: int = 0
         self._last_activity_time: float = time.time()
         self._stream_cleanup_count: int = 0
+        # BotGuard 引导模式（binding = 不替页面发消息；page_send = 老的 say '1' 兜底）。
+        # 一旦确认某条路在这台机器/账号上可用，后续切号就不再重复试探。
+        self._bootstrap_mode: str | None = None
+        self._binding_state: str = ""
+        # 最近一次写 binding 的页面（请求结束后按这个页面清空输入框，别清错标签页）
+        self._binding_page: CDPPage | None = None
 
     @property
     def state(self) -> SessionState:
@@ -117,6 +138,16 @@ class BrowserSession:
     def set_ready_context(self, context: SessionContext) -> None:
         """Set active ready context (used by transitions and test fixtures)."""
         self._gate.set_ready(context)
+
+    @property
+    def bootstrap_mode(self) -> str | None:
+        """BotGuard 引导走的是哪条路：binding（不发消息）/ page_send（兜底）。"""
+        return self._bootstrap_mode
+
+    @property
+    def binding_state(self) -> str:
+        """最近一次 binding 写入输入框的结果: synced / sync_failed / no_box / skipped。"""
+        return self._binding_state
 
     def get_current_auth_user(self) -> str:
         """获取当前活跃账号的 auth_user 编号（0, 1, 2...）。"""
@@ -203,6 +234,28 @@ class BrowserSession:
         """Switch auth using blue-green transition without killing in-flight streams."""
         await self.transition_to_account(auth_file, force_refresh=True)
 
+    def set_account(self, auth_file: str | None) -> None:
+        """预设账号（不启动浏览器）：池里每个 worker 用自己的 auth_file。
+
+        供 ClientPool 在 ``warmup()`` 之前调用；profile 目录会按 profile_suffix 隔离。
+        """
+        self._auth_file = auth_file
+        self._auth_user = get_auth_user_from_meta(auth_file)
+        self._tier = get_tier_from_meta(auth_file)
+        self._profile_dir = _suffixed_profile_dir(auth_file, self._profile_suffix)
+
+    @property
+    def auth_file(self) -> str | None:
+        return self._auth_file
+
+    @property
+    def profile_dir(self) -> str | None:
+        return self._profile_dir
+
+    @property
+    def profile_suffix(self) -> str:
+        return self._profile_suffix
+
     async def transition_to_account(
         self, auth_file: str | None, force_refresh: bool = False
     ) -> SessionContext:
@@ -224,7 +277,8 @@ class BrowserSession:
             self._auth_file = auth_file
             self._auth_user = target_auth_user
             self._tier = target_tier
-            self._profile_dir = derive_profile_dir(auth_file)
+            # 池模式下每台浏览器必须有自己的 profile 目录（同一账号也不能共用）
+            self._profile_dir = _suffixed_profile_dir(auth_file, self._profile_suffix)
             try:
                 # Real browser mode
                 if self._proc is None or not self._proc.is_alive():
@@ -242,6 +296,11 @@ class BrowserSession:
                     lambda: self._proc is None or self._proc.is_alive()
                 )
 
+                # 钩子必须在页面脚本之前装上（document-start）：页面加载后再注入的话，
+                # Angular DI 已经造完 BotGuardService 单例，DI 探针就抓不到它了。
+                with suppress(Exception):
+                    await new_page.add_init_script(build_document_start_hooks_js())
+
                 await load_cookies_to_page(new_page, auth_file)
                 await navigate_to_aistudio(
                     new_page,
@@ -258,6 +317,14 @@ class BrowserSession:
                     is_proc_alive_cb=lambda: (
                         self._proc is None or self._proc.is_alive()
                     ),
+                    # 已经确认这台机器上 binding 模式不可用时，后续切号直接走老的兜底路线
+                    prefer_binding=self._bootstrap_mode != "page_send",
+                )
+                mode = str(base_template.get("bootstrap_mode") or "")
+                if mode:
+                    self._bootstrap_mode = mode
+                log.info(
+                    "BotGuard 引导模式: %s", self._bootstrap_mode or "(unknown)"
                 )
 
                 target_tier = get_tier_from_meta(auth_file)
@@ -360,6 +427,14 @@ class BrowserSession:
         return base
 
     async def generate_snapshot(self, contents: list[AistudioContent]) -> str:
+        """给 contents 生成一次 WAA proof（含输入框 binding）。
+
+        binding 规则（照 Catiecli Playground Executor 2.4.9 / gemini2api 执行器 v2.0.0）：
+        WAA proof 与页面输入框状态强绑定，写进 `ms-prompt-box textarea` 的文本必须
+        **就是这份哈希的原文**。所以这里把拼接后的字符串连同它的 sha256 一起交给
+        页面脚本：它先写值（原生 setter + input/change）、确认页面认了，再调快照函数，
+        失败按 20s/30s/30s 三轮重试并在轮间做焦点扰动。清空由调用方在请求结束后做。
+        """
         ctx = await self.ensure_ready()
         hash_parts: list[str] = []
         for content in contents:
@@ -377,30 +452,59 @@ class BrowserSession:
                 else:
                     hash_parts.append("")
 
-        content_hash = sha256(" ".join(hash_parts).encode("utf-8")).hexdigest()
+        binding = " ".join(hash_parts)
+        content_hash = sha256(binding.encode("utf-8")).hexdigest()
 
         async with self._snapshot_lock:
-            for attempt in range(3):
-                try:
-                    snapshot = await ctx.page.evaluate(
-                        SNAPSHOT_GENERATE_JS, args=content_hash, timeout_s=10.0
-                    )
-                    if snapshot and isinstance(snapshot, str) and len(snapshot) > 0:
-                        return snapshot
-                except Exception as e:
-                    log.debug("快照计算第 %d 次尝试失败: %s", attempt + 1, e)
-                    if attempt < 2:
-                        await ctx.page.wait_for_timeout(100)
+            result = await ctx.page.evaluate(
+                SNAPSHOT_GENERATE_JS,
+                args=build_snapshot_args(binding=binding, content_hash=content_hash),
+                timeout_s=SNAPSHOT_EVAL_TIMEOUT_S,
+            )
 
-        raise RuntimeError(
-            f"Snapshot generation failed for content hash {content_hash[:8]}"
+        snapshot = ""
+        box_state = ""
+        if isinstance(result, dict):
+            snapshot = str(result.get("snapshot") or "")
+            box_state = str(result.get("box") or "")
+        elif isinstance(result, str):
+            # 兼容旧页面脚本与测试替身：直接返回 proof 字符串
+            snapshot = result
+        self._binding_state = box_state or ("skipped" if not binding else "unknown")
+        self._binding_page = ctx.page
+
+        if not snapshot:
+            raise RuntimeError(
+                f"Snapshot generation failed for content hash {content_hash[:8]}"
+            )
+        log.debug(
+            "WAA proof 就绪: %d chars, binding=%d chars (%s)",
+            len(snapshot),
+            len(binding),
+            self._binding_state,
         )
+        return snapshot
+
+    async def clear_prompt(self) -> None:
+        """请求结束后清空输入框里我们写进去的 binding。
+
+        红线：只写值、只清值；**不点发送、不按 Enter、不替页面发任何消息**。
+        """
+        page = self._binding_page
+        if page is None or page.is_closed():
+            page = self.page
+        if page is None or page.is_closed():
+            return
+        with suppress(Exception):
+            state = await page.evaluate(CLEAR_BINDING_JS, timeout_s=5.0)
+            if state not in (None, "cleared", "already_empty", "no_box"):
+                log.debug("清空提示词输入框返回: %s", state)
+        self._binding_page = None
 
     async def send_hooked_request(
         self,
         *,
         body: str,
-        timeout_ms: int,
         url: str | None = None,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
@@ -417,7 +521,6 @@ class BrowserSession:
             url=captured_url,
             headers=captured_headers,
             body=body,
-            timeout_ms=timeout_ms,
             auth_user=ctx.auth_user,
             tier=ctx.tier,
         )
@@ -426,7 +529,6 @@ class BrowserSession:
         self,
         *,
         body: str,
-        timeout_ms: int,
         url: str | None = None,
         headers: dict[str, str] | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
@@ -445,7 +547,6 @@ class BrowserSession:
                 url=captured_url,
                 headers=captured_headers,
                 body=body,
-                timeout_ms=timeout_ms,
                 auth_user=ctx.auth_user,
                 tier=ctx.tier,
             ):

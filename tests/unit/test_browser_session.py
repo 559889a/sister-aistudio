@@ -107,7 +107,6 @@ async def test_browser_session_send_hooked_request(mock_cdp_page):
         url="https://alkalimakersuite-pa.clients6.google.com/test",
         headers={"content-type": "application/json"},
         body='["test"]',
-        timeout_ms=5000,
     )
     assert status == 200
     assert body == b'["response_data"]'
@@ -162,7 +161,6 @@ async def test_browser_session_send_streaming_request(mock_cdp_page):
         url="https://alkalimakersuite-pa.clients6.google.com/stream",
         headers={"content-type": "application/json"},
         body='["stream"]',
-        timeout_ms=5000,
     ):
         collected.append((tag, data))
 
@@ -223,7 +221,7 @@ async def test_generate_snapshot_hash_complex_tools_and_multimodal():
             or "service, hash" in expr
         ):
             passed_args.append(args)
-            return "!snapshot_token_ok"
+            return {"snapshot": "!snapshot_token_ok", "box": "synced"}
         return None
 
     mock_page.evaluate.side_effect = fake_evaluate
@@ -272,11 +270,14 @@ async def test_generate_snapshot_hash_complex_tools_and_multimodal():
         "",  # function_response maps to ""
         "files/sample_data_file",
     ]
-    expected_hash = sha256(" ".join(expected_parts).encode("utf-8")).hexdigest()
+    expected_binding = " ".join(expected_parts)
+    expected_hash = sha256(expected_binding.encode("utf-8")).hexdigest()
 
     snapshot = await session.generate_snapshot(contents)
     assert snapshot == "!snapshot_token_ok"
-    assert passed_args == [expected_hash]
+    # binding 与哈希输入必须是同一份文本：写进输入框的就是哈希的原文
+    assert passed_args == [{"binding": expected_binding, "hash": expected_hash}]
+    assert session.binding_state == "synced"
 
 
 @pytest.mark.asyncio
@@ -453,41 +454,166 @@ async def test_browser_session_enable_temporary_chat(mock_cdp_page):
     assert "temporary" in expr.lower()
 
 
-@pytest.mark.asyncio
-async def test_bootstrap_botguard_in_page_interception_zero_quota(mock_cdp_page):
-    """Verify bootstrap_botguard_and_template captures in-page aborted GenerateContent template without network round-trip."""
-    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
-        bootstrap_botguard_and_template,
-    )
-
-    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+def _bootstrap_fake_eval(
+    *,
+    service_ready: bool = True,
+    probe_ok: bool = True,
+    probe_counter: list[int] | None = None,
+):
+    """引导期 evaluate 替身：输入框状态 / 页面请求头 / 探针签名 / 页面发消息各答一次。"""
 
     async def fake_eval(expr, *args, **kwargs):
         if "isSnapCandidate" in expr:
             return "hooked:snap_fn_key"
+        if "has_api_key" in expr:
+            return {
+                "has_box": True,
+                "boxes": 1,
+                "service": service_ready,
+                "snap_key": "snap_fn_key" if service_ready else "",
+                "visible": "visible",
+                "focused": True,
+            }
+        if "rpcHeaders" in expr:
+            return {
+                "x-goog-api-key": "AIzaSyTest",
+                "x-aistudio-visit-id": "visit-123",
+                "content-length": "999",
+            }
+        if "proof.length" in expr:
+            if probe_counter is not None:
+                probe_counter[0] += 1
+            if not service_ready:
+                return {"ok": False, "reason": "service_unavailable"}
+            if probe_ok:
+                return {"ok": True, "len": 1600}
+            return {"ok": False, "reason": "proof_timeout"}
+        if "runBtn" in expr:
+            return True
         if "window.__AISTUDIO__?.service" in expr:
             return True
         if "window.__AISTUDIO__?.capturedTemplate" in expr:
             return {
                 "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-                "headers": {
-                    "Content-Type": "application/json+protobuf",
-                    "X-Goog-Api-Key": "AIzaSyTest",
-                },
+                "headers": {"X-Goog-Api-Key": "AIzaSyTest"},
                 "body": '["models/gemini-3.8-flash",[[[[null,"say \'1\'"]],"user"]]]',
             }
-        if "runBtn" in expr:
-            return True
+        if "temporary" in expr.lower():
+            return False
         return None
 
-    mock_cdp_page.evaluate.side_effect = fake_eval
+    return fake_eval
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_botguard_binding_mode_never_sends(mock_cdp_page):
+    """binding 引导：不写探针消息、不点 Run、不按 Enter —— 只靠 DI 探针 + 页面头 + 探针签名。"""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+    mock_cdp_page.evaluate.side_effect = _bootstrap_fake_eval()
 
     snap_key, captured = await bootstrap_botguard_and_template(
+        mock_cdp_page, max_wait_seconds=5
+    )
+
+    assert snap_key == "snap_fn_key"
+    assert captured["bootstrap_mode"] == "binding"
+    assert "GenerateContent" in str(captured.get("url"))
+    headers = captured.get("headers")
+    assert isinstance(headers, dict)
+    # 页面采集到的会话级头进了模板；content-length 这类必须丢掉
+    assert headers.get("x-goog-api-key") == "AIzaSyTest"
+    assert headers.get("x-aistudio-visit-id") == "visit-123"
+    assert "content-length" not in headers
+    # 红线：不写输入框、不替页面发消息
+    mock_cdp_page.fill.assert_not_called()
+    mock_cdp_page.send_control_enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_botguard_falls_back_to_page_send(mock_cdp_page):
+    """探针签不出来时回退老流程：写 say '1' + 点 Run，模板标成 page_send。"""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+    mock_cdp_page.evaluate.side_effect = _bootstrap_fake_eval(probe_ok=False)
+
+    _snap_key, captured = await bootstrap_botguard_and_template(
         mock_cdp_page, max_wait_seconds=2
     )
-    assert snap_key == "snap_fn_key"
-    assert "GenerateContent" in str(captured.get("url"))
+
+    assert captured["bootstrap_mode"] == "page_send"
     assert "gemini-3.8-flash" in str(captured.get("body"))
+    mock_cdp_page.fill.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_botguard_bails_out_when_service_never_appears(mock_cdp_page):
+    """服务一直抓不到（例如页面构建不再导出 dms.TB）：连续 3 次就回退，不等满 35 秒。"""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        SERVICE_UNAVAILABLE_BAIL,
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+    counter = [0]
+    mock_cdp_page.evaluate.side_effect = _bootstrap_fake_eval(
+        service_ready=False, probe_counter=counter
+    )
+
+    _snap_key, captured = await bootstrap_botguard_and_template(
+        mock_cdp_page, max_wait_seconds=30
+    )
+
+    assert captured["bootstrap_mode"] == "page_send"
+    assert counter[0] == SERVICE_UNAVAILABLE_BAIL
+    mock_cdp_page.fill.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_botguard_refuses_page_send_when_disallowed(mock_cdp_page):
+    """allow_page_send=False：binding 引导失败要如实报错，不许偷偷替页面发消息。"""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+    mock_cdp_page.evaluate.side_effect = _bootstrap_fake_eval(probe_ok=False)
+
+    with pytest.raises(RuntimeError, match="allow_page_send"):
+        await bootstrap_botguard_and_template(
+            mock_cdp_page, max_wait_seconds=2, allow_page_send=False
+        )
+    mock_cdp_page.send_control_enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_prompt_clears_binding(mock_cdp_page):
+    """请求结束后清空输入框：只清值，不点发送、不按 Enter。"""
+    from aistudio_api.infrastructure.browser.scripts import CLEAR_BINDING_JS
+
+    mock_cdp_page.evaluate.return_value = "cleared"
+    session = BrowserSession(port=9222)
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="snap_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
+
+    await session.clear_prompt()
+
+    mock_cdp_page.evaluate.assert_awaited_once()
+    assert mock_cdp_page.evaluate.call_args[0][0] == CLEAR_BINDING_JS
+    mock_cdp_page.send_control_enter.assert_not_called()
 
 
 @pytest.mark.asyncio

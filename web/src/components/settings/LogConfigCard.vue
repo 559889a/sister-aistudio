@@ -4,9 +4,9 @@ import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
 import type { SystemConfig } from '@/types/system.ts'
 import Button from '@/components/ui/Button.vue'
-import ConfigSelect from '@/components/config/ConfigSelect.vue'
-import ConfigSwitch from '@/components/config/ConfigSwitch.vue'
-import ConfigInput from '@/components/config/ConfigInput.vue'
+import FormSelect from '@/components/ui/FormSelect.vue'
+import FormSwitch from '@/components/ui/FormSwitch.vue'
+import FormInput from '@/components/ui/FormInput.vue'
 import {
   Activity,
   Save,
@@ -124,7 +124,7 @@ async function handleSave() {
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <!-- 1. Log Level Configuration -->
       <div class="p-4 bg-gray-50/60 border border-gray-200/70 rounded-2xl space-y-2">
-        <ConfigSelect
+        <FormSelect
           :model-value="logLevel"
           label="日志输出级别"
           :options="logLevels"
@@ -134,7 +134,7 @@ async function handleSave() {
 
       <!-- 2. Request Dump Toggle -->
       <div class="p-4 bg-gray-50/60 border border-gray-200/70 rounded-2xl space-y-2">
-        <ConfigSwitch
+        <FormSwitch
           :model-value="dumpRequests"
           label="请求报文转储"
           description="在标准输出中打印完整的请求与响应详情"
@@ -148,7 +148,7 @@ async function handleSave() {
           <HardDrive class="w-3.5 h-3.5 text-brand-600" />
           <span>报文持久化落盘</span>
         </div>
-        <ConfigSwitch
+        <FormSwitch
           :model-value="dumpToFile"
           label="将报文保存为文件"
           description="将每次请求与响应报文写入磁盘独立文件"
@@ -162,7 +162,7 @@ async function handleSave() {
           <Folder class="w-3.5 h-3.5 text-brand-600" />
           <span>转储文件存储目录</span>
         </div>
-        <ConfigInput
+        <FormInput
           :model-value="dumpDir"
           label="保存路径"
           placeholder="dumps"

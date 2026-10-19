@@ -178,6 +178,81 @@ class GeminiSafetySetting(BaseModel):
     threshold: str
 
 
+# ── OpenAI 兼容端口的请求模型（POST /v1/chat/completions） ──
+#
+# 只做「够用的校验」：OpenAI 客户端会带一堆扩展字段（response_format / seed /
+# user / logprobs …），没声明的字段一律忽略，不能因为多一个键就 422。
+
+
+class OpenAIFunctionCall(BaseModel):
+    name: str
+    arguments: str | dict[str, object] | None = None
+
+
+class OpenAIToolCall(BaseModel):
+    id: str | None = None
+    type: str | None = "function"
+    index: int | None = None
+    function: OpenAIFunctionCall
+    # 主项目的扩展字段：Google 的思考签名挂在 tool_call 上往返
+    extra_content: dict[str, object] | None = None
+    thought_signature: str | None = None
+    thoughtSignature: str | None = None
+
+
+class OpenAIChatMessage(BaseModel):
+    role: str
+    content: str | list[dict[str, object]] | None = None
+    name: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[OpenAIToolCall] | None = None
+    reasoning_content: str | None = None
+    extra_content: dict[str, object] | None = None
+
+
+class OpenAIFunctionDefinition(BaseModel):
+    name: str
+    description: str | None = None
+    parameters: dict[str, object] | None = None
+    strict: bool | None = None
+
+
+class OpenAITool(BaseModel):
+    type: str | None = "function"
+    function: OpenAIFunctionDefinition | None = None
+
+
+class OpenAIStreamOptions(BaseModel):
+    include_usage: bool = False
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model: str
+    messages: list[OpenAIChatMessage]
+    stream: bool = False
+    stream_options: OpenAIStreamOptions | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    # OpenAI 规范里没有 top_k，但不少客户端（SillyTavern 等）会带，主项目也认
+    top_k: int | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    stop: str | list[str] | None = None
+    tools: list[OpenAITool] | None = None
+    tool_choice: str | dict[str, object] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    n: int | None = None
+    reasoning_effort: str | None = None
+    thinking: dict[str, object] | None = None
+    response_format: dict[str, object] | None = None
+    safety_settings: list[dict[str, object]] | None = None
+    seed: int | None = None
+    user: str | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
+
+
 class GeminiGenerateContentRequest(BaseModel):
     contents: list[GeminiContent]
     systemInstruction: GeminiContent | None = Field(
