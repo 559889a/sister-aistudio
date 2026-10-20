@@ -173,7 +173,7 @@ async def test_build_gemini_streaming_response_passes_requested_model():
         GeminiPart,
     )
     from aistudio_api.application.api_service_gemini import (
-        _build_gemini_streaming_response,
+        handle_gemini_generate_content,
     )
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
@@ -191,10 +191,8 @@ async def test_build_gemini_streaming_response_passes_requested_model():
     req = GeminiGenerateContentRequest(
         contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])]
     )
-    resp = _build_gemini_streaming_response(
-        client=mock_client,
-        req=req,
-        model_path="gemini-2.5-pro",
+    resp = await handle_gemini_generate_content(
+        "gemini-2.5-pro", req, mock_client, stream=True
     )
 
     chunks = [chunk async for chunk in resp.body_iterator]
@@ -213,7 +211,7 @@ async def test_streaming_metadata_then_error_emits_error_frame_without_retry():
         GeminiPart,
     )
     from aistudio_api.application.api_service_gemini import (
-        _build_gemini_streaming_response,
+        handle_gemini_generate_content,
     )
     from aistudio_api.domain.errors import RequestError
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
@@ -234,10 +232,8 @@ async def test_streaming_metadata_then_error_emits_error_frame_without_retry():
     req = GeminiGenerateContentRequest(
         contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])]
     )
-    resp = _build_gemini_streaming_response(
-        client=mock_client,
-        req=req,
-        model_path="gemini-3.8-flash",
+    resp = await handle_gemini_generate_content(
+        "gemini-3.8-flash", req, mock_client, stream=True
     )
 
     chunks = [chunk async for chunk in resp.body_iterator]

@@ -39,6 +39,8 @@ from aistudio_api.application.api_service_gemini import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from google.genai import Client as GenaiClient
+
     from aistudio_api.domain.models import ModelOutput
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
@@ -228,6 +230,20 @@ class AistudioTransport(httpx.AsyncBaseTransport):
             # 重启等副作用在异常抛出时已经发生）。
             logger.warning("SDK 桥流式中途失败: %s", exc)
             yield format_sse_error(exc).encode("utf-8")
+
+
+_SDK_CACHE: dict[int, tuple[AIStudioClient, GenaiClient]] = {}
+
+
+def get_sdk_client(gateway: AIStudioClient) -> GenaiClient:
+    """按网关实例缓存 SDK 客户端（runtime_state.client 是长生命周期单例）。"""
+    entry = _SDK_CACHE.get(id(gateway))
+    if entry is not None and entry[0] is gateway:
+        return entry[1]  # type: ignore[no-any-return]
+    sdk = build_sdk_client(gateway)
+    _SDK_CACHE[id(gateway)] = (gateway, sdk)
+    # shortcut: 没关旧 SDK 的 httpx.AsyncClient——transport 无真实连接，不泄漏 socket
+    return sdk
 
 
 def build_sdk_client(gateway: AIStudioClient):

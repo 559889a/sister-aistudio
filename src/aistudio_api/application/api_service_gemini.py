@@ -7,6 +7,7 @@ import json
 import re
 import time
 import traceback
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -14,11 +15,6 @@ from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 
-from aistudio_api.api.response_models import (
-    GeminiCandidateResponse,
-    GeminiContentResponse,
-    GeminiGenerateContentResponse,
-)
 from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
@@ -490,6 +486,31 @@ async def generate_content_output(
         )
 
 
+def _to_sdk_call(
+    model_path: str, req: GeminiGenerateContentRequest
+) -> tuple[str, list[dict[str, object]], dict[str, object]]:
+    """GeminiGenerateContentRequest → SDK generate_content 调用参数（官方 JSON 形状）。
+
+    模型字段名本身就是 camelCase，model_dump 直出；generationConfig 在官方 API
+    里平铺在 config 顶层，直接并入。SDK 会经 transport 往返一次（校验/默认值/
+    官方字段全集），最终仍走 generate_content_output / stream_raw_events 同一条
+    网关调用面——账号调度、覆写、故障现场记录全部按构造继承。
+    """
+    contents = [c.model_dump(exclude_none=True) for c in req.contents]
+    config: dict[str, object] = {}
+    if req.systemInstruction is not None:
+        config["system_instruction"] = req.systemInstruction.model_dump(exclude_none=True)
+    if req.tools is not None:
+        config["tools"] = [t.model_dump(exclude_none=True) for t in req.tools]
+    if req.safetySettings is not None:
+        config["safety_settings"] = [s.model_dump(exclude_none=True) for s in req.safetySettings]
+    if req.toolConfig is not None:
+        config["tool_config"] = dict(req.toolConfig)
+    if req.generationConfig is not None:
+        config.update(req.generationConfig.model_dump(exclude_none=True))
+    return model_path.removeprefix("models/"), contents, config
+
+
 async def handle_gemini_generate_content(
     model_path: str,
     req: GeminiGenerateContentRequest,
@@ -497,38 +518,45 @@ async def handle_gemini_generate_content(
     *,
     stream: bool,
 ):
+    """Gemini /v1beta 端口入口（2026-10-20 用户拍板走 google-genai SDK 路径；
+    OpenAI 端口保持 wire 手搓翻译，不经 SDK）。"""
+    # 懒加载：sdk_bridge 反向依赖本模块的 generate_content_output / stream_raw_events
+    from aistudio_api.application.sdk_bridge import get_sdk_client
+
+    sdk = get_sdk_client(client)
+    model, contents, config = _to_sdk_call(model_path, req)
     if stream:
         return _build_gemini_streaming_response(
-            client=client, req=req, model_path=model_path
+            sdk=sdk, model=model, contents=contents, config=config, model_path=model_path
         )
 
-    prepared, output = await generate_content_output(model_path, req, client)
-    include_thoughts = prepared.include_thoughts
-    return GeminiGenerateContentResponse(
-        candidates=[
-            GeminiCandidateResponse(
-                content=GeminiContentResponse(
-                    parts=to_gemini_parts(
-                        output.text,
-                        function_calls=output.function_calls,
-                        function_responses=output.function_responses,
-                        thinking=output.thinking if include_thoughts else "",
-                        images=output.images,
-                        reasoning_images=(
-                            output.reasoning_images if include_thoughts else []
-                        ),
-                    ),
-                ),
-                finishReason=to_gemini_finish_reason(
-                    output.candidates[0].finish_reason if output.candidates else None
-                ),
-                index=0,
-            )
-        ],
-        usageMetadata=to_gemini_usage_metadata(output.usage),
-        modelVersion=prepared.normalized.model,
-        responseId=output.response_id or None,
-    )
+    from google.genai import errors as genai_errors
+
+    try:
+        from typing import cast
+
+        from google.genai import types as genai_types
+
+        resp = await sdk.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config=cast("genai_types.GenerateContentConfigDict | None", config or None),
+        )
+    except genai_errors.APIError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        raise HTTPException(
+            code if code > 0 else 500,
+            detail={
+                "message": str(getattr(exc, "message", "") or exc),
+                "type": "bad_request" if code == 400 else "upstream_error",
+            },
+        ) from exc
+    data = resp.model_dump(mode="json", by_alias=True, exclude_none=True)
+    # 剥掉 SDK 客户端侧内部注记（非 API 字段）；富字段（grounding/logprobs 等）
+    # 原样透传——路由已去掉 response_model 收窄
+    for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
+        data.pop(k, None)
+    return data
 
 
 def format_sse_event(
@@ -691,111 +719,68 @@ async def stream_raw_events(
 
 def _build_gemini_streaming_response(
     *,
-    client: AIStudioClient,
-    req: GeminiGenerateContentRequest,
+    sdk,
+    model: str,
+    contents: list[dict[str, object]],
+    config: dict[str, object],
     model_path: str,
 ) -> StreamingResponse:
+    async def _chunk_frames() -> AsyncIterator[tuple[str, str]]:
+        """SDK 类型化 chunk → 官方 SSE 帧；顺带盯 finishReason 有没有到过。"""
+        saw_finish = False
+        from typing import cast
+
+        from google.genai import types as genai_types
+
+        stream = await sdk.aio.models.generate_content_stream(
+            model=model,
+            contents=contents,
+            config=cast("genai_types.GenerateContentConfigDict | None", config or None),
+        )
+        async for chunk in stream:
+            data = chunk.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
+                data.pop(k, None)
+            for cand in data.get("candidates") or []:
+                if isinstance(cand, dict) and cand.get("finishReason"):
+                    saw_finish = True
+            yield (
+                "chunk",
+                "data: " + json.dumps(data, ensure_ascii=False) + "\n\n",
+            )
+        if not saw_finish:
+            # 官方流最后一块必带 finishReason；没有就是被截断（含 SDK 类型层
+            # 吞掉流内 error 帧的情况）——补一帧错误，不许静默空流收场
+            yield (
+                "error_frame",
+                format_sse_error(RequestError(502, "stream ended without finishReason")),
+            )
+
     async def stream_response():
-        prepared: PreparedRequest | None = None
         started = time.perf_counter()
         bytes_out = 0
-        attempt = 1
-        headers_at: float | None = None
         first_event_at: float | None = None
         completed = False
         try:
-            final_usage: dict[str, object] | None = None
-            final_finish_reason: str = "STOP"
-            latest_response_id: str | None = None
-            buffered_thought_sig: str | None = None
-            async for event_type, text in stream_with_heartbeat(
-                stream_raw_events(model_path, req, client)
-            ):
-                now = time.perf_counter()
+            async for event_type, frame in stream_with_heartbeat(_chunk_frames()):
                 if event_type == HEARTBEAT_EVENT:
                     # 原生 Gemini 路由没有安全的空 data 帧形状：发 SSE 注释行（规范要求忽略）
                     yield ": ping\n\n"
                     continue
-                if event_type == "status":
-                    headers_at = now - started
-                    if first_event_at is None:
-                        first_event_at = headers_at
-                    logger.debug(
-                        "%s上游响应头 %s (%.1fs)", _rid(), text, headers_at
-                    )
-                    continue
-                if event_type == "attempt":
-                    attempt = int(text) if isinstance(text, int) else attempt + 1
-                    logger.debug("%s上游尝试 %d", _rid(), attempt)
-                    continue
-                if event_type == "prepared":
-                    prepared = text if isinstance(text, PreparedRequest) else None
-                    # 新的一轮尝试：上一轮失败留下的签名不能带进这一轮
-                    buffered_thought_sig = None
-                    continue
                 if first_event_at is None:
-                    first_event_at = now - started
-                if event_type == "usage":
-                    final_usage = text if isinstance(text, dict) else None
-                elif event_type == "finish_reason":
-                    final_finish_reason = (
-                        to_gemini_finish_reason(text)
-                        if isinstance(text, int)
-                        else str(text)
-                    )
-                elif event_type == "response_id":
-                    latest_response_id = str(text)
-                elif event_type == "thought_signature":
-                    buffered_thought_sig = str(text)
-                elif event_type == "done":
-                    continue
-                else:
-                    include_thoughts = (
-                        prepared.include_thoughts if prepared is not None else True
-                    )
-                    if not include_thoughts and event_type in (
-                        "thinking",
-                        "reasoning_images",
-                    ):
-                        continue
-                    chunk = format_sse_event(
-                        event_type,
-                        text,
-                        model_version=(
-                            prepared.normalized.model
-                            if prepared is not None
-                            else model_path
-                        ),
-                        response_id=latest_response_id,
-                        thought_signature=buffered_thought_sig,
-                    )
-                    buffered_thought_sig = None
-                    if chunk:
-                        bytes_out += len(chunk)
-                        yield chunk
-
-            target_model = (
-                prepared.normalized.model if prepared is not None else model_path
-            )
-            record_rotator_event("success", model=target_model)
-            if prepared is not None:
-                runtime_state.record(prepared.normalized.model, "success", final_usage)
-            usage_chunk = format_sse_usage(
-                final_usage,
-                finish_reason=final_finish_reason,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-            bytes_out += len(usage_chunk)
-            yield usage_chunk
+                    first_event_at = time.perf_counter() - started
+                # stream_with_heartbeat 的元素签名是 object（心跳元组共用）；
+                # 这里非心跳事件必为 SSE 帧字符串
+                frame = str(frame)
+                bytes_out += len(frame)
+                yield frame
             completed = True
         except (asyncio.CancelledError, GeneratorExit):
             logger.warning(
-                "%s客户端断开 (%.1fs, 已发 %dB, 尝试 %d)",
+                "%s客户端断开 (%.1fs, 已发 %dB)",
                 _rid(),
                 time.perf_counter() - started,
                 bytes_out,
-                attempt,
             )
             raise
         except Exception as exc:
@@ -810,9 +795,7 @@ def _build_gemini_streaming_response(
             yield format_sse_error(exc)
         finally:
             if completed:
-                first = (
-                    f"{first_event_at:.1f}s" if first_event_at is not None else "-"
-                )
+                first = f"{first_event_at:.1f}s" if first_event_at is not None else "-"
                 logger.info(
                     "← 完成 %s (gemini.native %s, %.1fs, 首包 %s, %dB)",
                     get_request_id() or "-",

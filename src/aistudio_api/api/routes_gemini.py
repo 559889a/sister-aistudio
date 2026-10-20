@@ -6,7 +6,6 @@ import time
 
 from fastapi import APIRouter, Depends
 
-from aistudio_api.api.response_models import GeminiGenerateContentResponse
 from aistudio_api.application.api_service_gemini import (
     classify_gemini_error_payload,
     handle_gemini_generate_content,
@@ -25,10 +24,8 @@ logger = get_logger("routes.gemini")
 router = APIRouter()
 
 
-@router.post(
-    "/v1beta/{model_path:path}:generateContent",
-    response_model=GeminiGenerateContentResponse,
-)
+@router.post("/v1beta/{model_path:path}:generateContent")
+# 不设 response_model：走 SDK 类型化响应，富字段（grounding/logprobs 等）原样透传
 async def generate_content(
     model_path: str,
     req: GeminiGenerateContentRequest,
