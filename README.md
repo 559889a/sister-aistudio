@@ -121,15 +121,15 @@ uv run python main.py server --port 8080
 
 ---
 
-### 一键启动（start.cmd）
+### 一键启动（start.ps1）
 
-**Windows**：运行仓库根目录的 `start.cmd`，服务直接在当前终端**前台**跑，日志实时打在屏幕上；按 `Ctrl+C` 就停（cmd 若追问 `Terminate batch job (Y/N)?` 按 `Y`）。
+**Windows**：在 PowerShell 里运行仓库根目录的 `start.ps1`，服务直接在当前终端**前台**跑，日志实时打在屏幕上；按 `Ctrl+C` 就停（PowerShell 不会追问 `Terminate batch job (Y/N)?`）。若提示执行策略受限，先执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
 
-```bat
-start.cmd
-set PORT=8081 && start.cmd              # 换端口
-set HOST=127.0.0.1 && start.cmd         # 只本机
-set AISTUDIO_BROWSER_HEADLESS=false && start.cmd   # 有头浏览器
+```powershell
+.\start.ps1
+$env:PORT='8081'; .\start.ps1              # 换端口
+$env:HOST='127.0.0.1'; .\start.ps1         # 只本机
+$env:AISTUDIO_BROWSER_HEADLESS='false'; .\start.ps1   # 有头浏览器
 ```
 
 脚本会自动复用 `.venv` / `venv`（都没有就用 PATH 里的 `python`），缺依赖时按 `requirements.txt` 装一遍。

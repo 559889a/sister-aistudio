@@ -132,9 +132,13 @@ class VertexExpressClient:
         return config
 
     def _call_kwargs(
-        self, model: str, **params: Any
+        self, model: str, *, streaming: bool, **params: Any
     ) -> tuple[dict[str, Any], BypassPlan | None]:
-        """(SDK 调用参数, bypass plan|None)。plan 本地传递，避免并发请求踩状态。"""
+        """(SDK 调用参数, bypass plan|None)。plan 本地传递，避免并发请求踩状态。
+
+        streaming 标志只配流式调用：非流式（unary）请求带
+        streamFunctionCallArguments 会被 Vertex 400 拒绝（2026-10-20 真机实测）。
+        """
         contents: list[AistudioContent] | None = params.get("contents")
         system_instruction_content = params.get("system_instruction_content")
         plan = None
@@ -158,7 +162,8 @@ class VertexExpressClient:
         if plan is not None:
             config["tools"] = bypass_tools_official(plan.tool_name)
             tool_cfg = bypass_tool_config_official(
-                plan.tool_name, streaming=channel_streaming_flag_enabled()
+                plan.tool_name,
+                streaming=streaming and channel_streaming_flag_enabled(),
             )
             if tool_cfg:
                 config["tool_config"] = tool_cfg
@@ -180,7 +185,7 @@ class VertexExpressClient:
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
         from google.genai import errors as genai_errors
 
-        kwargs, plan = self._call_kwargs(model, **params)
+        kwargs, plan = self._call_kwargs(model, streaming=False, **params)
         probe = new_stream_probe("vertex_express", model)
         try:
             resp = await self._client.aio.models.generate_content(**kwargs)
@@ -213,7 +218,7 @@ class VertexExpressClient:
     ) -> AsyncIterator[tuple[str, object]]:
         from google.genai import errors as genai_errors
 
-        kwargs, plan = self._call_kwargs(model, **params)
+        kwargs, plan = self._call_kwargs(model, streaming=True, **params)
         extractor = ChannelBypassExtractor(plan) if plan is not None else None
         probe = new_stream_probe("vertex_express", model)
         from aistudio_api.infrastructure.upstreams.common import (

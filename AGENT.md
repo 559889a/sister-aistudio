@@ -52,12 +52,12 @@ uv sync
 # 2. 准备受控浏览器运行时（仅首次执行）
 scripts\install-browser.bat
 
-# 3. 启动服务（前台运行，Ctrl+C 即停；或直接用 start.cmd）
+# 3. 启动服务（前台运行，Ctrl+C 即停；或直接用 start.ps1）
 uv run python main.py server --port 8080
 ```
 
 > [!NOTE]
-> - `start.cmd`：前台运行（选/建 venv → 装依赖 → 起服务），日志直接打在终端，**Ctrl+C 即停**。
+> - `start.ps1`：前台运行（选/建 venv → 装依赖 → 起服务），日志直接打在终端，**Ctrl+C 即停**（PowerShell 版替代了 start.cmd，没有 `Terminate batch job (Y/N)?` 追问；CurrentUser 执行策略已设 RemoteSigned）。
 > - 终端日志只保留 LLM 请求/上游重试/错误（健康检查、面板轮询、uvicorn access、httpx 逐请求都静音）；日志格式是 `[INFO] 2026-10-19T10:54:15.499Z [aistudio-api] …`，请求带短 id（`→` / `← 完成` / `请求失败` / `客户端断开`）。要协议细节把 `logging.level` 设 DEBUG。
 
 ### 2.2 前端构建与管理
@@ -70,7 +70,7 @@ uv run python main.py server --port 8080
 
 | 现象 | 原因 | 处理方案 |
 |---|---|---|
-| 端口被占用 | 上一次服务未完全退出 | 关掉旧 `start.cmd` 窗口（Ctrl+C）后重试，或指定 `--port <other_port>` |
+| 端口被占用 | 上一次服务未完全退出 | 关掉旧 `start.ps1` 窗口（Ctrl+C）后重试，或指定 `--port <other_port>` |
 | `Chromium CDP endpoint on port N not ready` | CloakBrowser 未安装或路径不对 | 重新运行 `scripts\install-browser.bat`，或设 `AISTUDIO_BROWSER_EXECUTABLE` |
 | `pydantic-core` 导入失败 | 使用了系统 pip 安装而非 `uv` | 清理 `.venv/` 后重新执行 `uv sync` |
 
@@ -360,11 +360,11 @@ $env:PYTHONIOENCODING = 'utf-8'
 # JS 语法
 node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 
-# 启动/停止：start.cmd 前台，Ctrl+C
-.\start.cmd
+# 启动/停止：start.ps1 前台，Ctrl+C
+.\start.ps1
 ```
 
-- `.venv` 是项目自己的虚拟环境（Python 3.14，`uv` 创建；`start.cmd` 用的就是它）。测试依赖
+- `.venv` 是项目自己的虚拟环境（Python 3.14，`uv` 创建；`start.ps1` 用的就是它）。测试依赖
   `pytest` / `pytest-asyncio` / `ruff` / `google-genai` 已装好；缺东西就
   `uv pip install --python .venv\Scripts\python.exe <pkg>`。
 - 运行期数据：`data/settings.json`（WebUI/`PUT /settings`，立即生效）、`data/accounts/<id>/auth.json`、
@@ -374,7 +374,7 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 - 主项目 `C:\build2api` 在 **8889** 跑着（用户自己的），**不要动它**；只读对比其
   `/__b2a/requests`（`Authorization: Bearer sk-123`）可以看到同通道的真实首包/总时长。
 - 额度：`gemini-4-argon` 日桶很小，**别拿它压测**；诊断用 `gemini-3.8-flash`。
-- **改完代码要重启 `start.cmd` 才生效**：用户 2026-10-20 05:5x 时 8080 上还跑着改前的进程；
+- **改完代码要重启 `start.ps1` 才生效**：用户 2026-10-20 05:5x 时 8080 上还跑着改前的进程；
   停服务只按用户的方式（Ctrl+C），别去 kill 进程号或动 9222/9223 的 Chromium。
 
 ### 6.5 诊断脚本（已随临时目录删除）

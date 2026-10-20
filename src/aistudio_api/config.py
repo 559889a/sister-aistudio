@@ -280,7 +280,10 @@ class Settings:
     upstream_mode: str = os.getenv("AISTUDIO_UPSTREAM", "aistudio").strip().lower() or "aistudio"
     vertex_express_api_key: str = os.getenv("VERTEX_EXPRESS_API_KEY", "")
     google_project_id: str = os.getenv("GOOGLE_PROJECT_ID", "")
-    express_location: str = os.getenv("AISTUDIO_EXPRESS_LOCATION", "")
+    # 默认 global：无位置的 express 入口由 Google 路由到项目默认区（实测 asia-southeast1），
+    # 新模型（4-argon 等）只在 global 发布，在那儿回与「模型名写错」分不开的 404
+    # （build2api 2026-10-14 同 key A/B：不钉 404 / 钉 global 429）。钉位置需配合项目号。
+    express_location: str = os.getenv("AISTUDIO_EXPRESS_LOCATION", "global")
     console_cookie: str = os.getenv("AISTUDIO_CONSOLE_COOKIE", "")
     console_project_id: str = os.getenv("AISTUDIO_CONSOLE_PROJECT_ID", "")
     dump_requests: bool = _load_dump_requests_env()

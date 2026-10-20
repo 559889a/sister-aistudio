@@ -47,9 +47,11 @@ def test_unified_formatter_plain_and_colored():
 
     plain_output = plain_formatter.format(record)
     assert "[INFO]" in plain_output
-    # 与主项目对齐的固定产品 tag + UTC ISO 毫秒时间戳
+    # 与主项目对齐的固定产品 tag + 本机时区 ISO 毫秒时间戳（Z 或 ±hhmm 偏移）
     assert "[aistudio-api]" in plain_output
-    assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", plain_output)
+    assert re.search(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(Z|[+-]\d{4})", plain_output
+    )
     assert "这是一条中文测试日志" in plain_output
 
     color_output = color_formatter.format(record)

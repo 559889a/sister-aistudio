@@ -61,12 +61,13 @@ def load_local_models() -> list[dict[str, Any]]:
 
 
 def local_model_list_payload(registry: UpstreamRegistry | None = None) -> dict[str, Any]:
-    """本地清单 → OpenAI /v1/models 形状；每个模型展开 base + 三通道 alias。"""
+    """本地清单 → OpenAI /v1/models 形状；只列三通道前缀别名（2026-10-20 用户指令：
+    不要裸模型名）。裸名仍可调用（pick() 落默认通道），只是不进列表。"""
     now = int(time.time())
     data: list[dict[str, Any]] = []
     for model in load_local_models():
         base_id = str(model["id"]).removeprefix("models/")
-        entries = [("", base_id)] + [
+        entries = [
             (prefix, base_id) for prefix in sorted(PREFIX_CHANNELS) if registry is None or registry.get(prefix) is not None
         ]
         for prefix, model_id in entries:

@@ -391,12 +391,31 @@ async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypat
     assert all(e[0] != "tool_calls" for e in events + tail_events)
 
 
+def test_local_model_list_prefix_only():
+    """模型列表只列带前缀的通道别名，不出现裸模型名（2026-10-20 用户指令）。"""
+    from aistudio_api.infrastructure.upstreams.registry import local_model_list_payload
+
+    class _AllChannels:
+        def get(self, _name):
+            return object()
+
+    ids = [m["id"] for m in local_model_list_payload(_AllChannels())["data"]]
+    assert ids, "模型列表不能为空"
+    prefixes = ("pg/", "express/", "cookie/")
+    assert all(i.startswith(prefixes) for i in ids), ids  # 无裸名
+    used = {next(p for p in prefixes if i.startswith(p)) for i in ids}
+    assert used == set(prefixes)  # 三通道都展开
+
+
 def test_channel_sentinels_full_context():
     """用户硬规则：两个哨兵开关开着时，整份上下文（含 system）的签名全必须是假的。"""
     from aistudio_api.application import runtime_settings as settings_module
-    from aistudio_api.infrastructure.upstreams.common import apply_channel_sentinels
     from aistudio_api.infrastructure.gateway.signatures import SKIP_SENTINEL
-    from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
+    from aistudio_api.infrastructure.gateway.wire_types import (
+        AistudioContent,
+        AistudioPart,
+    )
+    from aistudio_api.infrastructure.upstreams.common import apply_channel_sentinels
 
     values = dict(settings_module.DEFAULTS)
     values.update({"sigSentinelThought": True, "sigSentinelTool": True})

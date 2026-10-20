@@ -32,10 +32,11 @@ _LEVEL_ALIASES = {"WARNING": "WARN"}
 
 
 class UnifiedFormatter(logging.Formatter):
-    """统一日志格式：`[INFO] 2026-10-19T10:54:15.499Z [aistudio-api] ...`。
+    """统一日志格式：`[INFO] 2026-10-19T18:54:15.499+0800 [aistudio-api] ...`。
 
-    与主项目（gemini2api）的输出风格对齐：UTC ISO 时间戳（毫秒 + Z）、短级别名
+    与主项目（gemini2api）的输出风格对齐：ISO 时间戳（毫秒 + 时区偏移）、短级别名
     （WARNING → WARN）、固定的产品 tag。ANSI 颜色只在 TTY 上启用。
+    时间随本机时区（2026-10-20 用户指令，原先固定 UTC）；偏移后缀保证无歧义。
     """
 
     def __init__(self, use_color: bool | None = None) -> None:
@@ -47,8 +48,8 @@ class UnifiedFormatter(logging.Formatter):
     def formatTime(
         self, record: logging.LogRecord, _datefmt: str | None = None
     ) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=UTC)
-        return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}Z"
+        ts = datetime.fromtimestamp(record.created).astimezone()
+        return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}{ts:%z}"
 
     def format(self, record: logging.LogRecord) -> str:
         orig_levelname = record.levelname
