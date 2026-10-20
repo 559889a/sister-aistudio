@@ -77,23 +77,3 @@ def test_text_is_truncated_to_max_length(tmp_path: Path):
     values = store.update({"prefillNudge": too_long})
     assert len(values["prefillNudge"]) == int(item["max_length"])
 
-
-def test_bypass_mutex_switches():
-    """bypassEnabled 与 bypassStreamAntiTruncation 互斥：开一个自动关另一个，可同关。"""
-    from aistudio_api.application.runtime_settings import runtime_settings
-
-    runtime_settings.update({"bypassEnabled": True, "bypassStreamAntiTruncation": False})
-    runtime_settings.update({"bypassStreamAntiTruncation": True})
-    v = runtime_settings.values()
-    assert v["bypassStreamAntiTruncation"] is True
-    assert v["bypassEnabled"] is False  # 自动关掉老的
-
-    runtime_settings.update({"bypassEnabled": True})
-    v = runtime_settings.values()
-    assert v["bypassEnabled"] is True
-    assert v["bypassStreamAntiTruncation"] is False
-
-    runtime_settings.update({"bypassEnabled": False})
-    v = runtime_settings.values()
-    assert v["bypassEnabled"] is False
-    assert v["bypassStreamAntiTruncation"] is False  # 可以同关

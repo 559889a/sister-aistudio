@@ -312,9 +312,9 @@ def maybe_channel_bypass(
     from aistudio_api.application.bypass import apply_bypass
     from aistudio_api.application.runtime_settings import runtime_settings
 
-    # 新老开关互斥但共用这套注入机器：任一开启即注入（浏览器通道的老 bypass
-    # 仍只认 bypassEnabled；express/cookie 通道两个开关都走这里）
-    if not (runtime_settings.get("bypassEnabled") or runtime_settings.get("bypassStreamAntiTruncation")):
+    # 单一开关（2026-10-20 终局）：bypassEnabled 开 = 注入；行为按通道分化——
+    # express 走 dev（partialArgs 流式），pg/cookie 走老整块
+    if not runtime_settings.get("bypassEnabled"):
         return contents, system_instruction_content, None
     plan = apply_bypass(
         contents,
@@ -354,9 +354,10 @@ def bypass_tool_config_official(tool_name: str, *, streaming: bool) -> dict[str,
 
 
 def channel_streaming_flag_enabled() -> bool:
+    """express 通道的 dev 行为开关（2026-10-20 终局：与唯一 bypass 开关同体）。"""
     from aistudio_api.application.runtime_settings import runtime_settings
 
-    return bool(runtime_settings.get("bypassStreamAntiTruncation"))
+    return bool(runtime_settings.get("bypassEnabled"))
 
 
 class ChannelBypassExtractor:

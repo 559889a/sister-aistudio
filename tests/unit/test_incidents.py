@@ -256,7 +256,9 @@ async def test_stream_failure_lands_probe_in_incidents(tmp_path, monkeypatch):
     probe = getattr(exc_info.value, "stream_probe", None)
     assert probe and probe["channel"] == "vertex_express" and probe["error_class"]
     # 走一遍网关错误处理，确认 incidents 收到 stream_probe
-    with pytest.raises(Exception):  # noqa: PT011 - 任意终端错误皆可
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
         await svc.handle_attempt_exception(
             exc_info.value, model_path="m", normalized_model="m", client=MagicMock()
         )

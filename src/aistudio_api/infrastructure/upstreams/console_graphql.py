@@ -31,7 +31,6 @@ from aistudio_api.infrastructure.upstreams.common import (
     attach_stream_probe,
     bypass_tool_config_official,
     bypass_tools_official,
-    channel_streaming_flag_enabled,
     contents_to_official,
     finalize_stream_probe,
     maybe_channel_bypass,
@@ -55,7 +54,10 @@ BATCH_GRAPHQL_URL = (
     "/schemas/AIPLATFORM_GRAPHQL:batchGraphql"
     "?key=AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g&prettyPrint=false"
 )
-# 2026-10-04 Google 作废旧签名后重抓的 StreamGenerateContent 签名（登录模式）
+# StreamGenerateContent 签名：2/Hc4FpJfYmM… 是旧轮换产物但**仍被接受**；当前
+# 构建的三个新签名（2/o5+… V2 带 $dataset、2/A90ic… WithDebug、2/uoAaR… Agentstudio）
+# 实测都与我们的变量形状不匹配（404 Requested entity was not found，签名绑定
+# query 文本）。保持旧签名直到服务端轮换强制更换（2026-10-20 实测记录）。
 STREAM_GENERATE_QUERY_SIGNATURE = "2/Hc4FpJfYmM+gO5TB0hcjYY0Iwj0rqLIVDZOhurBbu/I="
 STREAM_GENERATE_OPERATION_NAME = "StreamGenerateContent"
 _SAPISIDHASH_ORIGIN = "https://console.cloud.google.com"
@@ -92,6 +94,9 @@ def build_console_authorization(cookie_str: str) -> str:
 
 
 def _request_context(project_id: str) -> dict[str, object]:
+    # clientVersion 实测（2026-10-20）不是纯装饰：换成 20261015.09 后同 cookie/项目
+    # 立刻 Permission 'aiplatform.endpoints.predict' denied（服务端按版本路由到带
+    # predict 鉴权的路径）。20260609.06 走 Studio 网页配额路径——保持不动。
     now_ms = int(time.time() * 1000)
     return {
         "clientVersion": "boq_cloud-boq-clientweb-vertexaistudio_20260609.06_p0",
@@ -249,9 +254,9 @@ class ConsoleGraphqlClient:
                 if isinstance(decl.get("parameters"), dict):
                     decl["parameters"] = _ui_schema(decl["parameters"])
             variables["tools"] = tools_official
-            tool_cfg = bypass_tool_config_official(
-                plan.tool_name, streaming=channel_streaming_flag_enabled()
-            )
+            # cookie 通道走老版本（2026-10-20 终局）：不发现实验开关——前端逆向
+            # 已证该字段会被序列化器剥掉，发了也只是脏指纹
+            tool_cfg = bypass_tool_config_official(plan.tool_name, streaming=False)
             if tool_cfg:
                 variables["toolConfig"] = tool_cfg
         else:

@@ -325,11 +325,11 @@ async def test_graphql_nonstream_aggregates():
 
 @pytest.mark.asyncio
 async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypatch):
-    """新开关独立生效（互斥：老开关关着）且带 streamFunctionCallArguments。"""
+    """单一 bypass 开关驱动 express dev 行为（partialArgs 流式 + 官方开关）。"""
     from aistudio_api.application import runtime_settings as settings_module
 
     values = dict(settings_module.DEFAULTS)
-    values.update({"bypassEnabled": False, "bypassStreamAntiTruncation": True})
+    values.update({"bypassEnabled": True})
     monkeypatch.setattr(settings_module.runtime_settings, "values", lambda: dict(values))
     monkeypatch.setattr(
         settings_module.runtime_settings, "get", lambda key, default=None: values.get(key, default)
@@ -342,7 +342,7 @@ async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypat
 
     contents = [AistudioContent(role="user", parts=[AistudioPart(text="写个故事")])]
     _contents2, _system, plan = maybe_channel_bypass(contents, None)
-    assert plan is not None  # 新开关独立触发注入
+    assert plan is not None  # 唯一开关触发注入
 
     extractor = ChannelBypassExtractor(plan)
     # partialArgs 增量：两片 + willContinue
