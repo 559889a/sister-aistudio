@@ -214,11 +214,8 @@ async def test_stream_failure_lands_probe_in_incidents(tmp_path, monkeypatch):
     """上游流中途死：stream_probe（死前收到多少/多久）必须落进 incidents.jsonl。"""
     from unittest.mock import MagicMock
 
-    from aistudio_api.infrastructure.upstreams.common import (
-        ChannelBypassExtractor,
-    )
-    from aistudio_api.infrastructure.upstreams import vertex_express as ve
     from aistudio_api.application import api_service_gemini as svc
+    from aistudio_api.infrastructure.upstreams import vertex_express as ve
 
     monkeypatch.setenv("AISTUDIO_DATA_DIR", str(tmp_path))
 
