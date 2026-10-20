@@ -62,11 +62,18 @@
 
         // 新版构建认形状：BotGuardService 的签名器挂在 `service.A.snapshot` 上
         // （旧构建的 `dms.TB` 只是那个类的导出名，名字随构建变、形状不变）。
+        // 2026-10-20 补双方法锚：_.YB 原型上的 initialize/getMetadata 未被压缩
+        // （incident-static-evidence-2026-10-20.md B-1），压缩属性 A 换名时靠它兜住。
         const looksLikeService = (obj) => {
             try {
+                if (!obj || typeof obj !== 'object') return false;
+                if (
+                    typeof obj.initialize === 'function' &&
+                    typeof obj.getMetadata === 'function'
+                ) {
+                    return true;
+                }
                 return !!(
-                    obj &&
-                    typeof obj === 'object' &&
                     obj.A &&
                     typeof obj.A === 'object' &&
                     typeof obj.A.snapshot === 'function'

@@ -124,7 +124,13 @@ def classify_error(status: int, body: str) -> AistudioError:
 
 
 def is_browser_session_hang_error(exc: Exception) -> bool:
-    """识别由于 CDP 断开、模板捕获超时或 BotGuard 握手未就绪引起的会话挂起异常。"""
+    """识别由于 CDP 断开、模板捕获超时或 BotGuard 握手未就绪引起的会话挂起异常。
+
+    2026-10-20 补 "snapshot" / "hook install"：WAA service 进 X 态后 snapshot
+    永久 throw（直到整页 reload，见 逆向相关内容/incident-static-evidence-2026-10-20.md
+    A-1），hook 装不上同理——这类故障原先落 unknown 分支变 500 且不重启浏览器，
+    X 态下会连环 500；归到这里走 502 + 重启，一次救活。
+    """
     if isinstance(exc, (RuntimeError, TimeoutError)):
         err = str(exc).lower()
         return any(
@@ -136,6 +142,8 @@ def is_browser_session_hang_error(exc: Exception) -> bool:
                 "cdp",
                 "closed",
                 "aborted",
+                "snapshot",
+                "hook install",
             )
         )
     return False

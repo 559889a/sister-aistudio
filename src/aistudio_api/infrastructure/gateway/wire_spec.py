@@ -27,6 +27,9 @@ class TopLevelIndex(IntEnum):
     SESSION_TOKEN = 11
     # field14：含时区信息的工具/位置配置；按真机 body 原样回写 [[null,null,"<TZ>"]]
     LOCATION = 13
+    # field17 (idx16)：长输出续页 continuationToken（页面 _.hr(x,17,token)，见
+    # 逆向相关内容/incident-static-evidence-2026-10-20.md A-4）——与 field12 的
+    # 会话 token 是两个字段；服务端截断且不给 token 时页面只能报错，与我们无关。
 
 
 class PartIndex(IntEnum):

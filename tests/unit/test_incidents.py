@@ -131,3 +131,19 @@ async def test_streaming_error_carries_raw_body(tmp_path, monkeypatch):
         async for _ in gateway.stream_chat(captured=FakeCaptured(), model="m"):
             pass
     assert exc_info.value.raw_upstream_body == raw_err
+
+
+def test_hook_chain_failures_classified_as_session_hang():
+    """snapshot X 态 / hook 装失败 → 会话挂死类（502+重启浏览器），不再变 500 干瞪眼。"""
+    from aistudio_api.domain.errors import is_browser_session_hang_error
+
+    assert is_browser_session_hang_error(
+        RuntimeError("Snapshot generation failed for content hash abcd1234")
+    )
+    assert is_browser_session_hang_error(
+        RuntimeError("Hook install failed: no_snapshot_fn (url=https://aistudio.google.com/)")
+    )
+    assert is_browser_session_hang_error(RuntimeError("template capture timeout"))
+    # 无关错误不能误伤
+    assert not is_browser_session_hang_error(ValueError("some unrelated error"))
+    assert not is_browser_session_hang_error(RuntimeError("wire codec mismatch"))
