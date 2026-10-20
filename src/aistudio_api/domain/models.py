@@ -22,7 +22,6 @@ class Candidate:
     function_calls: list[dict[str, object]] = field(default_factory=list)
     function_responses: list[dict[str, object]] = field(default_factory=list)
     thought_signature: str = ""
-    sources: list[dict[str, object]] = field(default_factory=list)
     code_output: str = ""
     finish_reason: int | None = None
     finish_message: str = ""
@@ -70,10 +69,6 @@ class ModelOutput:
     @property
     def function_responses(self) -> list[dict[str, object]]:
         return self.candidates[0].function_responses if self.candidates else []
-
-    @property
-    def sources(self) -> list[dict[str, object]]:
-        return self.candidates[0].sources if self.candidates else []
 
     @property
     def code_output(self) -> str:
