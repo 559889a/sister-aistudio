@@ -96,11 +96,6 @@ _FALLBACK_MODELS = [
         "description": "Latest Gemini 3.8 Flash model",
     },
     {
-        "id": "gemini-3.8-flash",
-        "displayName": "Gemini 3.7 Flash",
-        "description": "Gemini 3.7 Flash default text model",
-    },
-    {
         "id": "gemini-3.5-flash-lite",
         "displayName": "Gemini 3.5 Flash Lite",
         "description": "Ultra fast and lightweight model",
@@ -486,9 +481,8 @@ class ModelDiscoveryService:
             access_modes = _extract_int_list(item[82]) if len(item) > 82 else []
 
             # 过滤支持内容生成的模型
-            if not any("generateContent" in str(m) for m in methods) and not any(
+            if not any("generateContent" in str(m) for m in methods) and not (
                 "image" in model_id or "veo" in model_id or "lyria" in model_id
-                for _ in [0]
             ):
                 continue
 

@@ -385,27 +385,6 @@ runtime_settings = RuntimeSettings()
 # ---------- 语义 helper（消费方直接用，别再自己解释 schema） ----------
 
 
-def include_thoughts() -> bool:
-    return bool(runtime_settings.get("includeThoughts"))
-
-
-def drop_max_tokens() -> bool:
-    return bool(runtime_settings.get("dropMaxTokens"))
-
-
-def max_output_tokens_override() -> int | None:
-    raw = runtime_settings.get("maxOutputTokens")
-    return int(raw) if raw else None
-
-
-def thinking_mode() -> str:
-    return str(runtime_settings.get("thinkingMode") or "request")
-
-
-def thinking_level() -> str:
-    return str(runtime_settings.get("thinkingLevel") or "")
-
-
 def prefill_enabled() -> bool:
     return bool(runtime_settings.get("prefillEnabled"))
 
@@ -432,14 +411,9 @@ __all__ = [
     "SCHEMA",
     "RuntimeSettings",
     "bypass_enabled",
-    "drop_max_tokens",
-    "include_thoughts",
-    "max_output_tokens_override",
     "prefill_cot_guard",
     "prefill_enabled",
     "runtime_settings",
     "sig_sentinel_thought",
     "sig_sentinel_tool",
-    "thinking_level",
-    "thinking_mode",
 ]
