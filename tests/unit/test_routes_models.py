@@ -33,10 +33,10 @@ async def test_list_models_returns_gemini_format(monkeypatch):
 async def test_get_single_model_returns_model_object(monkeypatch):
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
-        response = await client.get("/v1beta/models/gemini-3.7-flash")
+        response = await client.get("/v1beta/models/gemini-3.8-flash")
         assert response.status_code == 200
         data = response.json()
-        assert data["name"] == "models/gemini-3.7-flash"
+        assert data["name"] == "models/gemini-3.8-flash"
         assert "displayName" in data
         assert "supportedGenerationMethods" in data
 

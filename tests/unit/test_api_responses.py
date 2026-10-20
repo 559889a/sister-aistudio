@@ -147,8 +147,8 @@ async def test_handle_attempt_exception_404_raises_without_retry():
     with pytest.raises(HTTPException) as exc_info:
         await handle_attempt_exception(
             ambiguous_err,
-            model_path="gemini-3.7-flash",
-            normalized_model="models/gemini-3.7-flash",
+            model_path="gemini-3.8-flash",
+            normalized_model="models/gemini-3.8-flash",
             client=mock_client,
         )
     assert exc_info.value.status_code == 404
@@ -237,7 +237,7 @@ async def test_streaming_metadata_then_error_emits_error_frame_without_retry():
     resp = _build_gemini_streaming_response(
         client=mock_client,
         req=req,
-        model_path="gemini-3.7-flash",
+        model_path="gemini-3.8-flash",
     )
 
     chunks = [chunk async for chunk in resp.body_iterator]

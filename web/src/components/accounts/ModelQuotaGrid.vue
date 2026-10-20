@@ -61,12 +61,6 @@ const emit = defineEmits<{
             <span>配额耗尽 ({{ account.model_cooldowns[String(modelKey)] }}s)</span>
           </button>
           <span
-            v-else-if="account.model_drip_mode && account.model_drip_mode[String(modelKey)]"
-            class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200"
-          >
-            滴灌重试中
-          </span>
-          <span
             v-else-if="account.model_rate_limited && account.model_rate_limited[String(modelKey)]"
             class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200"
           >

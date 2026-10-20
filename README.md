@@ -45,8 +45,8 @@
 | 功能模块 | 说明 |
 |---|---|
 | **Gemini 协议兼容** | 支持 `/v1beta/...` 接口规范，包括 Thinking 思维链、多模态、Function Calling 工具调用及图片生成 |
-| **动态模型发现** | 自动向上游同步可用模型列表，支持 `gemini-3.7-flash`、`gemini-3.8-flash` 等最新模型 |
-| **多账号自动轮换** | 多账号管理与按模型独立记录 429 配额的冷却调度，每日美西午夜自动重置（网关对当次请求零自动重试，失败按真实错误返回） |
+| **动态模型发现** | 自动向上游同步可用模型列表，支持 `gemini-3.8-flash`、`gemini-3.8-flash` 等最新模型 |
+| **多账号自动轮换** | 单浏览器上的账号池：只有 429 驱动换号，且第 5 次 429 才把账号/模型打入冷宫（防误杀），每日美西午夜自动重置；网关对当次请求零自动重试，失败按真实错误返回 |
 | **运行状态持久化** | 模型调用量、Token 消耗统计 (`stats.json`) 以及账号 429 限额与冷却状态 (`rotator_state.json`) 自动落盘，容器/服务重启不丢失状态 |
 | **下游参数容错与丢弃** | 支持配置 `drop_unsupported_params` 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
@@ -259,12 +259,11 @@ docker compose up -d
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化模型调用与 Token 统计（1=开启，0=关闭） |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号 429 冷却与调度状态（1=开启，0=关闭） |
 | `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径（Docker 内为 `/opt/cloakbrowser/chrome`） |
-| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP)；池模式下第 N 台用 `端口 + N` |
-| `AISTUDIO_BROWSER_POOL_SIZE` | int | `2` | 浏览器 worker 池大小（1=单浏览器旧路径；2..4=多台负载均衡 + 失败自愈） |
+| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP)，单浏览器独占 |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否以无头模式运行 Chromium |
 | `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | 浏览器空闲自动回收超时秒数（Termux 下默认 900s，桌面端 1800s，0 为禁用） |
 | `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Termux 环境下专用的 proot-distro 容器名称 |
-| `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.7-flash` | 默认文本模型 |
+| `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.8-flash` | 默认文本模型 |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | 默认图像生成模型 |
 | `AISTUDIO_TIMEZONE` | string | 自动探测 | 受控浏览器指纹与 Wire 协议交互时区（默认 `America/Los_Angeles`） |
 | `AISTUDIO_LOCALE` | string | `en-US` | 受控浏览器区域语言 |
@@ -304,36 +303,20 @@ curl -s -X PUT http://127.0.0.1:8080/settings \
 > 「输出可能不完整」，不驱动重试。
 ---
 
-## 浏览器池与自愈（默认 2 台）
+## 单浏览器与账号池（零自动重试）
 
-`AISTUDIO_BROWSER_POOL_SIZE`（默认 **2**，夹在 1..4）控制浏览器 worker 池：
+单台受控 Chromium 承载全部请求（多浏览器 worker 池已按用户要求于 2026-10-20 移除）；
+**账号池保留**：多账号在同一台浏览器上轮换，切换走蓝绿热切（在途流式不中断）。
 
-- **每台一台独立 Chromium**：第 N 台 CDP 端口 = `AISTUDIO_BROWSER_PORT + N`（默认 **9222 / 9223**），
-  profile 目录也按 worker 隔离（同一份 auth_file 是 `.../profile-w0`、`.../profile-w1`），
-  两台不会抢 SingletonLock；内存约 **300–500 MB/台**，机器吃紧可以设回 1。
-- **两台都接请求**：按 `(inflight, last_used)` 做 least-inflight 分发；账号按
-  `i % n` 绑定到 worker（只有 1 份 cookie 时两台共用同一份，启动日志会 WARN 一次，属预期）。
-- **故障自愈（零自动重试）**：403/401、5xx、502、页面 fetch/XHR 传输失败都按 **worker 故障**处理——
-  后台 kill + 重启那台 Chromium，让**后续**请求拿到干净页面；**本次请求不重试**，
-  按真实错误返回（传输失败 = 502），要不要重发由客户端决定。这些错误**不会给账号加冷却**
-  （它们不是配额问题）；只有 429 保留账号/模型的配额冷却（只记账，不重启）；
-  登录态失效（SessionExpiredError，真的被跳到登录页）仍按账号隔离 24h。
-- **手动切号同步全池**：WebUI「切换账号」/删除账号会把**所有** worker 重绑到目标账号
-  （就绪的走蓝绿热切、在途流式不中断；空闲休眠的下次拉起时生效），不会再出现
-  「一半请求还挂在旧账号」；传输失败时日志附 CDP 网络层证据（`net::ERR_*`）便于归因断连。
-- 被 kill 的 worker 重启期间处于 cooling（默认 15s 不再派活），连续重启失败会冷却 60s；
-  **空闲回收（STOPPED）的那台仍会被下次请求重新拉起**（20~40s）。
-- 设为 `1` 即回到旧的单浏览器路径（同样零重试；故障时杀掉浏览器进程，下次请求重建）。
-
-```bash
-# Windows 命令行临时启用两台（start.cmd 会读取这些环境变量）
-set AISTUDIO_BROWSER_POOL_SIZE=2
-start.cmd
-```
-
-> [!NOTE]
-> 真实自愈冒烟会真的重启 Chromium：日志里用 `pool: worker #0/#1` 区分两台，
-> 请求日志里有 `worker=#N` 与短 request id；验证完记得关服务（池会一起关掉两台浏览器）。
+- **只有 429 驱动换号，且防误杀**：单账号/模型累计**第 5 次** 429 才打入冷宫
+  （冷却到美西午夜配额重置）；前 4 次只计数不冷却、不换号，成功一次即清零计数。
+- **故障自愈（零自动重试）**：403/401、页面 fetch/XHR 传输失败、会话挂死、登录页重定向
+  都是**浏览器故障**——杀掉浏览器进程（下次请求自动重建），让**后续**请求拿到干净页面；
+  **本次请求不重试**，按真实错误返回（传输失败 = 502），要不要重发由客户端决定。
+  这些错误**不给账号加冷却**（不是配额问题），也**不换号**。
+- **登录态失效**（SessionExpiredError，真的被跳到登录页）凭据已死，按账号隔离 24h 并重启浏览器。
+- 传输失败时日志附 CDP 网络层证据（`net::ERR_*`）便于归因断连。
+- 空闲自动回收（`AISTUDIO_BROWSER_IDLE_TIMEOUT`）后，下次请求会重新拉起浏览器（20~40s）。
 
 ---
 
@@ -357,7 +340,7 @@ start.cmd
 
 如果上游在第一帧之前断开（页面 `fetch` 抛 `TypeError: Failed to fetch`），网关会：
 
-1. 记一次 `BrowserTransportError`（不是 500），后台 kill + 重启这台 worker（救后续请求）；
+1. 记一次 `BrowserTransportError`（不是 500），杀掉浏览器进程、下次请求重建（救后续请求）；
 2. **本次请求直接返回 502 `upstream_error`，不自动重试**（网关零自动重试，2026-10-20 拍板），
    客户端要重试就重发一条新请求。
 
@@ -390,7 +373,7 @@ curl http://localhost:8080/v1beta/models \
 <summary><b>2. 文本生成 (Non-streaming)</b></summary>
 
 ```bash
-curl http://localhost:8080/v1beta/models/gemini-3.7-flash:generateContent \
+curl http://localhost:8080/v1beta/models/gemini-3.8-flash:generateContent \
   -H "x-goog-api-key: your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -408,7 +391,7 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:generateContent \
 <summary><b>3. 流式生成 (Server-Sent Events)</b></summary>
 
 ```bash
-curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?alt=sse \
+curl http://localhost:8080/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse \
   -H "x-goog-api-key: your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -441,7 +424,7 @@ client = genai.Client(
 
 # 1. 流式响应
 response = client.models.generate_content_stream(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="解释一下什么是反应式编程？",
 )
 for chunk in response:
@@ -449,7 +432,7 @@ for chunk in response:
 
 # 2. 非流式响应
 result = client.models.generate_content(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="用 Python 写一个快速排序算法。",
 )
 print(result.text)
@@ -497,7 +480,7 @@ weather_tool = types.Tool(
 )
 
 response = client.models.generate_content(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="今天杭州天气怎么样？",
     config=types.GenerateContentConfig(tools=[weather_tool]),
 )

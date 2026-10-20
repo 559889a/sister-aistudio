@@ -15,7 +15,6 @@ export interface AccountRotationStats {
   model_rate_limited_dates?: Record<string, string>
   model_requests?: Record<string, number>
   model_rate_limited?: Record<string, number>
-  model_drip_mode?: Record<string, boolean>
 }
 
 export interface RotationStatusResponse {

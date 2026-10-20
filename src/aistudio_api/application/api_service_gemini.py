@@ -70,35 +70,17 @@ def _rid() -> str:
     return f"({rid}) " if rid else ""
 
 
-def _is_pool_client(client: object) -> bool:
-    """识别 pool 模式：``ClientPool`` 显式带 ``is_pool=True`` 标记。
-
-    不能用 ``hasattr(client, "on_transport_error")``：测试里的普通 ``MagicMock``
-    对任意属性名都返回 Mock，会被误判成 pool。
-    """
-    return getattr(client, "is_pool", False) is True
-
-
-def _pool_account_id() -> str | None:
-    """pool 模式下本次请求实际落在哪个账号（worker 绑定，而非全局 active）。"""
-    try:
-        from aistudio_api.infrastructure.gateway.client_pool import (
-            get_current_account_id,
-        )
-
-        return get_current_account_id() or None
-    except Exception:  # pragma: no cover - 运行时缺模块只影响日志里的账号归因
-        return None
-
-
+# finishReason 枚举对齐当前页面构建的一手证据（2026-10-20 bundle 复核，
+# 见 逆向相关内容/independent-re-2026-10-20.md：mcf 错误文案 Map + FO:434 / B2:1862）。
+# 注意 5=OTHER、6=LANGUAGE（曾长期互换）；15=Image error / 16=No image / 17=Image recitation。
 WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
     0: "FINISH_REASON_UNSPECIFIED",
     1: "STOP",
     2: "MAX_TOKENS",
     3: "SAFETY",
     4: "RECITATION",
-    5: "LANGUAGE",
-    6: "OTHER",
+    5: "OTHER",
+    6: "LANGUAGE",
     7: "BLOCKLIST",
     8: "PROHIBITED_CONTENT",
     9: "SPII",
@@ -107,9 +89,10 @@ WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
     12: "UNEXPECTED_TOOL_CALL",
     13: "TOO_MANY_TOOL_CALLS",
     14: "IMAGE_PROHIBITED_CONTENT",
-    15: "NO_IMAGE",
-    16: "IMAGE_RECITATION",
-    17: "IMAGE_OTHER",
+    15: "IMAGE_OTHER",
+    16: "NO_IMAGE",
+    17: "IMAGE_RECITATION",
+    18: "MISSING_THOUGHT_SIGNATURE",
 }
 
 
@@ -201,40 +184,21 @@ async def handle_attempt_exception(
     client: AIStudioClient,
     attempt_elapsed_s: float | None = None,
 ) -> NoReturn:
-    """错误归类 + 唯一自愈动作（后台重启无头浏览器）+ 抛出真实错误（绝不重试）。
+    """错误归类 + 唯一自愈动作（重启浏览器）+ 抛出真实错误（绝不重试）。
 
-    用户拍板（2026-10-20）：网关层不做任何自动重试——不切备用 worker、不清模板
-    原地重打、不切账号重试，本次请求按真实错误返回，由客户端自己决定要不要重发。
+    用户拍板（2026-10-20）：单浏览器 + 账号池；网关层不做任何自动重试——失败按
+    真实错误返回，由客户端自己决定要不要重发。**只有 429 驱动换号**，且防误杀：
+    第 5 次 429 才把账号/模型打入冷宫（前 4 次只计数，见 account_rotator）。
 
-    - pool（``ClientPool``）：403/401、5xx、页面传输失败、会话挂死 → 后台重启绑定的
-      worker；这些错误**不给账号加冷却**（不是配额问题）。
-    - 单浏览器：同样语义，重启 = 杀掉浏览器进程（下次请求 ``ensure_ready`` 重建）。
-    - 429 只记账（账号/模型配额冷却，下次请求调度器避开），不重启不重试。
-    - 登录态失效（SessionExpiredError）按账号隔离 24h 并重启浏览器，返回 401。
+    - 403/401、页面传输失败、会话挂死、登录页重定向 → 杀掉浏览器进程（下次请求
+      ``ensure_ready`` 重建）救**后续**请求；403 不加账号冷却、不换号。
+    - 429 只记账（429 计数 +1，第 5 次冷却到美西午夜），不重启浏览器。
+    - 登录态失效（SessionExpiredError）凭据已死，按账号隔离 24h 并重启浏览器。
     """
     target_model = normalized_model or model_path
-    pooled = _is_pool_client(client)
-    if pooled:
-        # pool 模式下账号由 worker 绑定，不能拿全局 active 账号顶替
-        failed_id = _pool_account_id()
-    else:
-        account_svc = runtime_state.account_service
-        active_acc = account_svc.get_active_account() if account_svc else None
-        failed_id = active_acc.id if active_acc else None
 
-    async def _restart_browser(hook_name: str, *hook_args: object) -> None:
-        """重启无头浏览器：pool 后台重启绑定的 worker；单浏览器杀进程待重建。"""
-        if pooled:
-            hook = getattr(client, hook_name, None)
-            if not callable(hook):
-                return
-            try:
-                await hook(*hook_args)
-            except Exception as hook_exc:  # pragma: no cover - 防御：绝不让自愈把错误改写成 500
-                logger.warning(
-                    "%spool 钩子 %s 执行失败: %s", _rid(), hook_name, hook_exc
-                )
-            return
+    async def _restart_browser() -> None:
+        """杀掉浏览器进程，下次请求 ensure_ready 重建。"""
         client.clear_templates()
         session = client._session
         if session is not None:
@@ -250,11 +214,8 @@ async def handle_attempt_exception(
 
     if isinstance(exc, SessionExpiredError):
         logger.warning("%s账号会话失效，已被重定向到登录页: %s", _rid(), exc)
-        client.clear_templates()
-        record_rotator_event(
-            "session_expired", model=target_model, account_id=failed_id
-        )
-        await _restart_browser("on_auth_error", target_model)
+        record_rotator_event("session_expired", model=target_model)
+        await _restart_browser()
         raise HTTPException(
             401,
             detail={
@@ -267,18 +228,17 @@ async def handle_attempt_exception(
         logger.warning(
             "%s账号 403 权限拒绝%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
-        client.clear_templates()
-        # 403/401 不是配额问题（2026-10-19 拍板）：不给账号加冷却，按浏览器故障重启
-        record_rotator_event("error", model=target_model, account_id=failed_id)
-        await _restart_browser("on_auth_error", target_model)
+        # 403/401 不是配额问题（2026-10-19 拍板）：不换号、不加账号冷却，按浏览器故障重启
+        record_rotator_event("error", model=target_model)
+        await _restart_browser()
         raise HTTPException(
             403, detail={"message": str(exc), "type": "auth_error"}
         ) from exc
 
     if isinstance(exc, UsageLimitExceeded):
         runtime_state.record(target_model, "rate_limited")
-        # 429 是真正的配额问题：保留账号/模型冷却（下次请求调度器会避开），不重启
-        record_rotator_event("rate_limited", model=target_model, account_id=failed_id)
+        # 429 是唯一的换号驱动（2026-10-20 拍板）：第 5 次才冷却（见 account_rotator）
+        record_rotator_event("rate_limited", model=target_model)
         logger.warning("%s429 触发限额: model=%s", _rid(), target_model)
         raise HTTPException(
             429,
@@ -291,14 +251,14 @@ async def handle_attempt_exception(
     if isinstance(exc, BrowserTransportError):
         # 页面里的 fetch/XHR 网络失败（Failed to fetch 这类）：这台浏览器坏了。
         # 重启它救**后续**请求；本次请求 502，客户端要重试就重发一条新请求。
-        record_rotator_event("error", model=target_model, account_id=failed_id)
+        record_rotator_event("error", model=target_model)
         logger.warning(
             "%s浏览器页面请求失败%s，后台重启浏览器，本次请求 502: %s",
             _rid(),
             _fmt_elapsed(attempt_elapsed_s),
             clean_upstream_error_message(str(exc)),
         )
-        await _restart_browser("on_transport_error", target_model)
+        await _restart_browser()
         raise HTTPException(
             502,
             detail={
@@ -316,8 +276,8 @@ async def handle_attempt_exception(
             exc,
         )
         client.clear_templates()
-        record_rotator_event("error", model=target_model, account_id=failed_id)
-        await _restart_browser("on_transport_error", target_model)
+        record_rotator_event("error", model=target_model)
+        await _restart_browser()
         raise HTTPException(
             502, detail={"message": str(exc), "type": "upstream_error"}
         ) from exc
@@ -325,18 +285,13 @@ async def handle_attempt_exception(
     if isinstance(exc, RequestError):
         clean_msg = clean_upstream_error_message(str(exc))
         status_code = exc.status if exc.status > 0 else 500
-        if status_code >= 500 and pooled:
-            # 5xx 按浏览器故障处理（重启 worker），但最终仍按上游原始状态码抛
-            record_rotator_event("error", model=target_model, account_id=failed_id)
-            await _restart_browser("on_server_error", target_model, status_code)
-        else:
-            logger.warning(
-                "%sGemini 上游请求错误 (%d)%s: %s",
-                _rid(),
-                status_code,
-                _fmt_elapsed(attempt_elapsed_s),
-                clean_msg,
-            )
+        logger.warning(
+            "%sGemini 上游请求错误 (%d)%s: %s",
+            _rid(),
+            status_code,
+            _fmt_elapsed(attempt_elapsed_s),
+            clean_msg,
+        )
         error_type = (
             "bad_request"
             if status_code == 400
@@ -350,7 +305,7 @@ async def handle_attempt_exception(
 
     if isinstance(exc, AistudioError):
         runtime_state.record(target_model, "errors")
-        record_rotator_event("error", model=target_model, account_id=failed_id)
+        record_rotator_event("error", model=target_model)
         logger.warning(
             "%sGemini 服务端异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
@@ -359,7 +314,7 @@ async def handle_attempt_exception(
         ) from exc
 
     runtime_state.record(target_model, "errors")
-    record_rotator_event("error", model=target_model, account_id=failed_id)
+    record_rotator_event("error", model=target_model)
     logger.error(
         "%sGemini 未知严重异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
     )
@@ -434,11 +389,7 @@ async def generate_content_output(
             sanitize_plain_text=False,
         )
 
-        record_rotator_event(
-            "success",
-            model=normalized.model,
-            account_id=_pool_account_id(),
-        )
+        record_rotator_event("success", model=normalized.model)
         runtime_state.record(normalized.model, "success", output.usage)
         logger.debug(
             "%s上游返回: 输入Tokens=%s, 输出Tokens=%s",
@@ -744,11 +695,7 @@ def _build_gemini_streaming_response(
             target_model = (
                 prepared.normalized.model if prepared is not None else model_path
             )
-            record_rotator_event(
-                "success",
-                model=target_model,
-                account_id=_pool_account_id(),
-            )
+            record_rotator_event("success", model=target_model)
             if prepared is not None:
                 runtime_state.record(prepared.normalized.model, "success", final_usage)
             usage_chunk = format_sse_usage(

@@ -157,12 +157,9 @@ async def try_switch_account(
 async def ensure_active_account(model: str | None = None) -> None:
     """确保存在活跃账号且对目标模型可用（**请求前置调度**，不是失败重试）。
 
-    pool 模式（ClientPool）由池子自己按 least-inflight + 账号可用性选 worker，
-    这里不再动「全局活跃账号」——否则会和 worker 各自绑定的账号打架。
+    只有 429 冷却（第 5 次打入冷宫）和登录态失效会让账号「不可用」——
+    403 等浏览器故障不记账，不会触发这里的换号。
     """
-    client = runtime_state.client
-    if getattr(client, "is_pool", False) is True:
-        return
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
     current = account_svc.get_active_account() if account_svc else None

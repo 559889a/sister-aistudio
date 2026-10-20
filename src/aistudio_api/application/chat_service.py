@@ -809,6 +809,8 @@ def normalize_gemini_request(
             )
         if generation_config.logprobs is not None:
             generation_config_overrides["logprobs"] = generation_config.logprobs
+        if generation_config.seed is not None:
+            generation_config_overrides["seed"] = generation_config.seed
         if generation_config.mediaResolution is not None:
             generation_config_overrides["media_resolution"] = (
                 generation_config.mediaResolution

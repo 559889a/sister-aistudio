@@ -150,7 +150,7 @@ def test_dump_request_exchange_output():
         dump_request_exchange(
             req_id="req_test123",
             method="POST",
-            url="/v1beta/models/gemini-3.7-flash:generateContent",
+            url="/v1beta/models/gemini-3.8-flash:generateContent",
             client="127.0.0.1:54321",
             headers={
                 "authorization": "Bearer secret1234567890",
@@ -172,7 +172,7 @@ def test_dump_request_exchange_output():
         )
         assert "客户端:       127.0.0.1:54321" in output
         assert (
-            "请求接口:     POST /v1beta/models/gemini-3.7-flash:generateContent"
+            "请求接口:     POST /v1beta/models/gemini-3.8-flash:generateContent"
             in output
         )
         assert "Bearer secre..." in output  # 敏感 Token 适度脱敏

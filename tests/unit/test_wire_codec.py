@@ -30,7 +30,7 @@ def test_decode_short_template_body_pads_missing_indexes():
 
     # 补齐之后仍能正常编码出可用的 wire body（没工具/时区时尾部 None 会被裁掉，这是既有行为）
     body = json.loads(codec.encode(request))
-    assert len(body) >= AistudioWireCodec.CACHED_CONTENT_INDEX + 1
+    assert len(body) >= AistudioWireCodec.SESSION_TOKEN_INDEX + 1
     assert body[AistudioWireCodec.MODEL_INDEX] == "models/gemini-3.8-flash"
     assert body[AistudioWireCodec.REQUEST_FLAG_INDEX] == 1
 
@@ -361,7 +361,7 @@ def test_decode_image_request_maps_generation_config_fields_from_proto_indexes()
     assert request.generation_config.image_output_mode == [2, 1]
     assert request.generation_config.thinking_config == [1, None, None, 3]
     assert request.request_flag == 1
-    assert request.cached_content is not None and request.cached_content.startswith(
+    assert request.session_token is not None and request.session_token.startswith(
         "v1_"
     )
 
@@ -371,14 +371,17 @@ def test_encode_preserves_newly_mapped_proto_fields():
     raw = (FIXTURES / "test_image_input.json").read_text()
 
     request = codec.decode(raw)
+    # seed 是独立 wire 槽位（idx18，bundle 写入点 tUa=Sk(a,19,b)），必须往返不丢
+    request.generation_config.seed = 424242
     encoded = codec.encode(request)
     reparsed = codec.decode(encoded)
 
     assert reparsed.generation_config.stop_sequences == ["6"]
     assert reparsed.generation_config.image_output_mode == [2, 1]
     assert reparsed.generation_config.thinking_config == [1, None, None, 3]
+    assert reparsed.generation_config.seed == 424242
     assert reparsed.request_flag == 1
-    assert reparsed.cached_content == request.cached_content
+    assert reparsed.session_token == request.session_token
 
 
 def test_thinking_config_encodes_high_level_wire_shape():
@@ -431,10 +434,10 @@ def test_wire_codec_retains_schema_with_tools():
 
 
 def test_modify_body_handles_tool_config_semantically_and_preserves_evergreen_uri():
-    original = '["models/gemini-3.7-flash",[[[[null,"hi"]],"user"]],null,[null,null,null,65536,1,0.95,64],"!snap",null,null,null,null,null,1]'
+    original = '["models/gemini-3.8-flash",[[[[null,"hi"]],"user"]],null,[null,null,null,65536,1,0.95,64],"!snap",null,null,null,null,null,1]'
     rewritten = modify_body(
         original,
-        model="models/gemini-3.7-flash",
+        model="models/gemini-3.8-flash",
         tools=[[None, [["get_weather", "desc", None], ["other_fn", "desc", None]]]],
         tool_config=[None, [2, ["get_weather"]]],
     )
@@ -447,7 +450,7 @@ def test_modify_body_handles_tool_config_semantically_and_preserves_evergreen_ur
     # Mode NONE suppresses tools completely
     rewritten_none = modify_body(
         original,
-        model="models/gemini-3.7-flash",
+        model="models/gemini-3.8-flash",
         tools=[[None, [["get_weather", "desc", None]]]],
         tool_config=[None, [3]],
     )

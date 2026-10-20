@@ -157,7 +157,7 @@ class AistudioWireCodec:
     TOOLS_INDEX = TopLevelIndex.TOOLS
     EVERGREEN_MODEL_URI_INDEX = TopLevelIndex.EVERGREEN_MODEL_URI
     REQUEST_FLAG_INDEX = TopLevelIndex.REQUEST_FLAG
-    CACHED_CONTENT_INDEX = TopLevelIndex.CACHED_CONTENT
+    SESSION_TOKEN_INDEX = TopLevelIndex.SESSION_TOKEN
     TIMEZONE_INDEX = TopLevelIndex.LOCATION
 
     def decode(self, raw_body: str) -> AistudioRequest:
@@ -194,8 +194,8 @@ class AistudioWireCodec:
             request_flag=body[self.REQUEST_FLAG_INDEX]
             if len(body) > self.REQUEST_FLAG_INDEX
             else None,
-            cached_content=body[self.CACHED_CONTENT_INDEX]
-            if len(body) > self.CACHED_CONTENT_INDEX
+            session_token=body[self.SESSION_TOKEN_INDEX]
+            if len(body) > self.SESSION_TOKEN_INDEX
             else None,
             location=body[self.TIMEZONE_INDEX]
             if len(body) > self.TIMEZONE_INDEX
@@ -223,7 +223,7 @@ class AistudioWireCodec:
         body[self.REQUEST_FLAG_INDEX] = (
             request.request_flag if request.request_flag is not None else 1
         )
-        body[self.CACHED_CONTENT_INDEX] = request.cached_content
+        body[self.SESSION_TOKEN_INDEX] = request.session_token
         body[self.TIMEZONE_INDEX] = request.location
 
         model_defaults = resolve_model_defaults(request.model)
@@ -246,7 +246,7 @@ class AistudioWireCodec:
                     1,
                 ]
             else:
-                while len(body) > self.CACHED_CONTENT_INDEX + 1 and body[-1] is None:
+                while len(body) > self.SESSION_TOKEN_INDEX + 1 and body[-1] is None:
                     body.pop()
         return json.dumps(body, separators=(",", ":"), ensure_ascii=False)
 

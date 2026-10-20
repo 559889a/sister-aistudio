@@ -46,7 +46,7 @@ logger = get_logger("server")
 async def lifespan(_app: FastAPI):
     from aistudio_api.application.account_rotator import init_rotator
     from aistudio_api.application.account_service import AccountService
-    from aistudio_api.config import clamp_pool_size, settings
+    from aistudio_api.config import settings
     from aistudio_api.infrastructure.account.account_store import AccountStore
     from aistudio_api.infrastructure.browser.browser_engine import (
         install_process_cleanup_handlers,
@@ -54,22 +54,10 @@ async def lifespan(_app: FastAPI):
 
     install_process_cleanup_handlers()
 
-    # 浏览器 worker 池：pool_size>1 时用 ClientPool（多台 Chromium 负载均衡 + 失败自愈），
-    # =1 时保持原来的单浏览器路径（现有测试与兼容性都靠它）。
-    pool_size = clamp_pool_size(settings.browser_pool_size)
-    client: object
-    if pool_size > 1:
-        from aistudio_api.infrastructure.gateway.client_pool import ClientPool
-
-        client = ClientPool(
-            size=pool_size,
-            port_base=runtime_state.browser_port,
-        )
-    else:
-        client = AIStudioClient(
-            port=runtime_state.browser_port,
-        )
-    runtime_state.client = client  # type: ignore[assignment]
+    # 单浏览器（用户 2026-10-20 拍板：不再要浏览器 worker 池）；账号池保留——
+    # 多账号在这台浏览器上轮换（蓝绿热切，在途流不中断）。
+    client = AIStudioClient(port=runtime_state.browser_port)
+    runtime_state.client = client
 
     # 初始化账号管理服务
     account_store = AccountStore()
@@ -81,19 +69,18 @@ async def lifespan(_app: FastAPI):
     runtime_state.rotator = rotator
 
     logger.info(
-        "Client initialized (pool=%d, port=%s, accounts=%d)",
-        pool_size,
+        "Client initialized (port=%s, accounts=%d)",
         runtime_state.browser_port,
         len(account_store.list_accounts()),
     )
 
-    # 后台预热浏览器，避免首次请求延迟（池模式下内部串行拉起，避免两台同时开的内存峰值）
+    # 后台预热浏览器，避免首次请求延迟
     warmup_task = None
 
     async def _warmup():
         for attempt in range(3):
             try:
-                await client.warmup()  # type: ignore[attr-defined]
+                await client.warmup()
                 return
             except Exception as e:
                 if attempt < 2:
@@ -113,11 +100,7 @@ async def lifespan(_app: FastAPI):
                     active_client = runtime_state.client
                     if active_client is None:
                         continue
-                    check_pool = getattr(active_client, "check_idle_timeouts", None)
-                    if callable(check_pool):
-                        await check_pool()
-                        continue
-                    session = getattr(active_client, "_session", None)
+                    session = active_client._session
                     if session is not None:
                         await session.check_idle_timeout()
                 except Exception as e:

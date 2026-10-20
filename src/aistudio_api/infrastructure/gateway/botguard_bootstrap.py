@@ -61,7 +61,7 @@ DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
         "X-Goog-AuthUser": "0",
         "Referer": "https://aistudio.google.com/",
     },
-    "body": '["models/gemini-3.7-flash"]',
+    "body": '["models/gemini-3.8-flash"]',
 }
 HEADER_DENY = ("content-length", "host", "connection")
 

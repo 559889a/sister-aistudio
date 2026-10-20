@@ -98,7 +98,7 @@ async def test_model_discovery_parse():
     raw_mock = [
         [
             [
-                "models/gemini-3.7-flash",
+                "models/gemini-3.8-flash",
                 None,
                 "0.1",
                 "Gemini 3.7 Flash",
@@ -121,7 +121,7 @@ async def test_model_discovery_parse():
     ]
     parsed = model_discovery._parse_raw_models(raw_mock)
     assert len(parsed) == 2
-    assert parsed[0]["id"] == "gemini-3.7-flash"
+    assert parsed[0]["id"] == "gemini-3.8-flash"
     assert parsed[0]["category"] == "flash"
     assert parsed[1]["id"] == "gemini-3.1-flash-image"
     assert parsed[1]["category"] == "image"

@@ -62,6 +62,7 @@ FINISH_REASON_MAP: dict[str, str | None] = {
     "IMAGE_OTHER": "stop",
     "NO_IMAGE": "stop",
     "IMAGE_RECITATION": "content_filter",
+    "MISSING_THOUGHT_SIGNATURE": "stop",
     # 未指定不代表结束，不能当终止信号
     "FINISH_REASON_UNSPECIFIED": None,
 }
@@ -435,6 +436,8 @@ def _build_generation_config(
         values["presencePenalty"] = float(payload.presence_penalty)
     if payload.frequency_penalty is not None:
         values["frequencyPenalty"] = float(payload.frequency_penalty)
+    if payload.seed is not None:
+        values["seed"] = int(payload.seed)
 
     max_tokens = (
         payload.max_completion_tokens

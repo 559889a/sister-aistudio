@@ -29,8 +29,8 @@
 - **流式不做生成看门狗，只发心跳**（用户明确要求）：不存在「单次生成最长等待 / 流式空闲超时」这类会掐断长回答的计时器——`streaming_init.js`、`hooked_request.js`、`transport.py` 里都不许加回来。需要保活就在 SSE 层发心跳（`application/stream_heartbeat.py`，1 秒间隔；OpenAI 发空 delta chunk、Gemini 原生发 `: ping` 注释行），它只写字节、不改变上游等待逻辑。基础设施类超时（浏览器启动/Cdp 连接/BotGuard 签名）保留。
 - **流式 JSON 修复只救截断、不改内容**：`IncrementalJSONStreamParser` 的 `feed()` 对解析失败的完整分块先补全再解析，`finish()` 抢救流末尾被截断的最后一块（走与 `feed()` 同一个 `_consume()`）；补全只做「闭合字符串/数组/对象、处理末尾反斜杠」，不得改写已有正文。`wire_parser.parse_response_part` 里「2 元素且 index1 是角色名」的守卫只拦 `[parts, role]` 形状，别扩大成按角色名一律丢弃（正文恰好是 model/user/system/assistant 时会真丢字）。
 - **页面 fetch/XHR 的网络失败是 `BrowserTransportError`，不是 500**：`transport.py` 把 `Failed to fetch`、页面关闭、CDP 命令超时统一抛这个类型；`handle_attempt_exception` 在**还没吐任何正文**时清模板缓存原地重试（页面不可用则重建会话），已吐数据或重试耗尽报 502 `UNAVAILABLE`。别退回「未知严重异常 → 500」，也**不要**因为传输失败去切换账号——账号本身没坏。
-- **网关层零自动重试（用户 2026-10-20 拍板，别加回来）**：网关对**当次请求**不做任何自动重试——不切备用 worker、不清模板原地重打、不切账号重试（204、偶发 Ambiguous 404 抖动也不重试）；失败按真实错误返回，由客户端决定重发。`handle_attempt_exception` 返回 `NoReturn`：归类 + 记账 + 唯一自愈动作（特定故障后台重启浏览器）+ 抛错。调度层动作不是重试、保留：`ensure_active_account` 请求前置挑号、429 配额冷却、SessionExpired 账号隔离 24h。
-- **浏览器 worker 池：worker 隔离、单请求绑定、故障只重启不重试**：`AISTUDIO_BROWSER_POOL_SIZE>1` 时由 `infrastructure/gateway/client_pool.py` 管 N 台 Chromium——第 N 台 CDP 端口 = `browser_port+N`、profile 目录按 `-wN` 后缀隔离（同一 auth_file 也不许共用目录）；一个请求由 `pick()` 绑定到一台 worker（ContextVar `current_worker/current_account_id`），**中途不换 worker**。403/401、5xx、502、页面传输失败都按 **worker 故障**处理：后台 kill+重启那台，本次请求按真实错误返回；这些错误**不给账号加冷却**（只有 429 保留配额冷却、SessionExpiredError 才按账号隔离）。429 不重启 worker。单浏览器路径（`pool_size=1`）同语义：重启 = 杀进程，下次请求 `ensure_ready` 重建。
+- **网关层零自动重试（用户 2026-10-20 拍板，别加回来）**：网关对**当次请求**不做任何自动重试——不清模板原地重打、不切账号重试（204、偶发 Ambiguous 404 抖动也不重试）；失败按真实错误返回，由客户端决定重发。`handle_attempt_exception` 返回 `NoReturn`：归类 + 记账 + 唯一自愈动作（特定故障重启浏览器）+ 抛错。调度层动作不是重试、保留：`ensure_active_account` 请求前置挑号、429 冷却、SessionExpired 账号隔离 24h。
+- **单浏览器 + 账号池，只有 429 换号且第 5 次才入冷宫（用户 2026-10-20 拍板）**：多浏览器 worker 池（`client_pool.py`、`AISTUDIO_BROWSER_POOL_SIZE`）已整体移除，**别再加回来**；全部请求跑在一台 Chromium 上，多账号靠 `BrowserSession.switch_auth` 蓝绿热切轮换（在途流不中断）。换号**只由 429 驱动**：`account_rotator.RATE_LIMITED_COOLDOWN_THRESHOLD = 5`——单账号/模型累计第 5 次 429 才冷却到美西午夜（前 4 次只计数不冷却，成功一次清零计数；防误杀）。403/401、传输失败、会话挂死是浏览器故障：清模板 + 杀进程（下次请求 `ensure_ready` 重建），**不记账不换号**；SessionExpired 按账号隔离 24h 并重启浏览器。
 - **bypass 请求的上游是「整段返回」，不是网关丢事件**：bypass 会注入合成 functionCall，Gemini 不分片下发函数参数，**上游第一帧就是整段工具调用**，在此之前连 HTTP 响应头都不到（2026-10-20 真机复测：bypass 开 首包 5.4s/总 5.5s、正文 1 块；bypass 关 首包 3.1s/总 7.8s、19 块逐块到达）。**周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20，几百秒的请求只会刷屏）——不要加回来**；判据是完成日志的「首包 X s / 总 Y s」，失败归因靠 CDP 网络层证据 WARN。**也不要因此加看门狗、提前 502、或伪造分块**。
 - Flake：页面 `fetch` 在长等待后抛 `Failed to fetch` 是真实的网络/上游断开（`BrowserTransportError`），不是本项目的 abort（`abort_stream` 目前没有任何调用点）；按 worker 故障重启 + 有备用就切，没备用才 502。主项目（`C:\build2api`）同通道记录里也有一次 183s 的 `Failed to fetch`。
 - **架构事实优先（Fact & Architecture over Brittle Tests）**：保持架构整洁与低耦合。避免为了迁就耦合了私有变量的脆弱 mock 测试而妥协生产设计；遇冲突时应重构测试以对齐公共接口契约，消除抽象泄露。
@@ -193,7 +193,7 @@ uv run python3 main.py server --port 8080
 > 1. **原子化文件持久化**：所有持久化文件（`registry.json`、`auth.json`、`meta.json` 等）操作必须使用 `account_store._atomic_write_json`（写入临时文件后通过 `os.replace` 原子替换），防止并发写入截断。
 2. **蓝绿会话平滑热切与就绪门机制**：切换账号时，`BrowserSession` 在后台创建独立新标签页，注入 Cookie、完成页面导航与 BotGuard 握手验证；验证通过后原子翻转 `SessionReadinessGate` 并将新上下文设为就绪。旧会话上下文加入退休队列，优雅等待在途流式请求排干（`decr_in_flight()` 触发 `drain_event`）后再行关闭，保障流式请求平滑过渡零中断。
 3. **缓存与模板隔离**：账号切换、429 限流或 403 鉴权重试时，调用 `client.clear_templates()`，避免跨账号复用请求模板。快照签名按每次请求哈希实时生成，绝不跨请求共享。初次握手截获基线模板后，任意目标模型通过 `capture_template(model)` 纯内存动态适配参数。
-4. **鉴权/服务端/传输故障：一律「记账 + 重启浏览器 + 真实错误返回」（零重试，别再退回去）**：403/401、5xx、502、页面 fetch/XHR 传输失败**都不是账号问题**——不写 `auth_cooldown`（不要调 `record_auth_error`），按浏览器故障处理：pool 后台 kill+重启那台 worker，单浏览器杀进程待下次请求重建；本次请求按真实状态码返回（传输失败 502）。只有 429 保留账号/模型的配额冷却（只记账，不重启 worker）；只有 `SessionExpiredError`（真的被跳到登录页）按账号隔离 24h。
+4. **鉴权/服务端/传输故障：一律「记账 + 重启浏览器 + 真实错误返回」（零重试，别再退回去）**：403/401、页面 fetch/XHR 传输失败、会话挂死**都不是账号问题**——不写 `auth_cooldown`（不要调 `record_auth_error`），按浏览器故障处理：清模板 + 杀掉浏览器进程（下次请求 `ensure_ready` 重建）；本次请求按真实状态码返回（传输失败 502）。只有 429 驱动换号（第 5 次才冷却，见 §1）；只有 `SessionExpiredError`（真的被跳到登录页）按账号隔离 24h。
 5. **无全局 DOM 污染**：页面内 JavaScript 交互使用局部闭包 `Promise` 返回数据，不在 `window` 对象上遗留全局共享状态。
 6. **Cookie 智能精简与天然协商**：外部导入 Cookie 时自动过滤旧设备或跨 IP 绑定的易腐败凭据（`OSID`、`__Secure-OSID`、`SIDCC` 及 `_ga` 等追踪标记），保留核心认证项（`SID`、`SAPISID`、`1PSIDTS`）。浏览器访问 AI Studio 时自动协商出绑定当前网络/TLS 的全新有效 `OSID`，杜绝 403 权限拒绝。
 7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制以保障 Android 低 RAM 运行；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
@@ -254,7 +254,7 @@ aistudio-api/
 │   │   ├── browser/               # 异步 CDP 客户端与 CloakBrowser 进程管理 (cdp_client, browser_engine)
 │   │   └── gateway/               # 会话状态机、蓝绿就绪门、鉴权凭据、WAA 引导 (botguard_bootstrap)、
 │   │                              # Wire 编解码与流式管道、签名哨兵 (signatures.py)、
-│   │                              # 多浏览器 worker 池与失败自愈 (client_pool.py)
+│   │                              # 单浏览器 + 账号池（client.py / session.py 蓝绿热切）
 ├── config.yaml                    # 模型规则与工具默认行为配置（手工编辑，重启生效）
 ├── main.py                        # 本地统一启动入口
 └── tests/                        # 单元测试套件 (模块化轻量架构，全量通过 <5s)
@@ -287,12 +287,13 @@ aistudio-api/
 | **（第三轮）debug+精简**：删死代码 `get_next_account_with_stats`（50 行）、`AIStudioClient.replay/_captured`；status_map 提常量、page_send 收尾去重、clamp_pool_size 复用 | `account_rotator.py`、`client.py`、`botguard_bootstrap.py`、`app.py` 等 | 全量 567/7，净 -50 行 |
 | **（第三轮）独立逆向复核后修复 digest**：`generate_snapshot` 剔除 executableCode/codeExecutionResult（页面 `_.Tm` 只算 text/inline/fileId，多算是 403[7] 诱因）；`wire_spec` 语义标注修正（14=responseModalities 等） | `infrastructure/gateway/session.py`、`wire_spec.py` | 新增 `test_generate_snapshot_digest_ignores_code_parts`；完整报告在 `逆向相关内容/re-verification-2026-10-20.md`（本地，不入库） |
 | **（第四轮，2026-10-20）网关零自动重试**：用户拍板移除全部当次请求重试（切备用 worker / 单浏览器原地重试 / 切号重试 / 204 与 Ambiguous 404 抖动重试、`MAX_RETRIES`、备用判定 `_standby_worker`）；自愈仅剩「特定故障后台重启浏览器」（403/401、5xx、传输失败、会话挂死、登录页重定向），429 只记账不重启 | `application/api_service_gemini.py`、`infrastructure/gateway/client_pool.py`、`application/account_orchestrator.py` + 5 个测试文件 | 全量 **563 passed / 7 failed**（7 条全是 §6.3.7 环境类既有失败）；ruff 0 errors；pyright 86 = 基线持平 0 新增 |
+| **（第五轮，2026-10-20）单浏览器 + 429 冷宫规则 + 一手证据修 bug**：① 移除多浏览器 worker 池（`client_pool.py` / `AISTUDIO_BROWSER_POOL_SIZE` / `clamp_pool_size` / 池分支路由全删），账号池保留（蓝绿热切）；② 只有 429 换号，`RATE_LIMITED_COOLDOWN_THRESHOLD=5`（第 5 次 429 才冷却到午夜，成功清零计数；drip 模式删除）；③ 常驻逆向 agent 一手复核（`逆向相关内容/independent-re-2026-10-20.md`）修了 3 个真 bug：seed 槽位（genConfig idx18，此前两端口都静默丢 seed）、finishReason 5/6 互换与 15/16/17 错位 + 补 18=MISSING_THOUGHT_SIGNATURE、idx11 语义更正（会话 token `v1_…`，非 cachedContent）；④ 硬编码 `gemini-3.7-flash` → `gemini-3.8-flash`；⑤ 流式预填充泄漏修复（非 200 不吐 prefill） | `app.py`、`routes_accounts.py`、`account_rotator.py`、`wire_spec/types/codec`、`schemas.py`、`chat_service.py`、`openai_bridge.py`、`streaming.py`、web 前端 | 全量 **533 passed / 7 failed**（基线不变）；ruff 0；pyright 78（比基线 86 少 8，0 新增）；web lint/type-check/build 全过 |
 | 文档：binding 新构建、bypass 整段返回、池 standby 语义 | `README.md`、`AGENT.md`、`docs/BOTGUARD_VERIFICATION_CHAIN.md` | — |
 
-上一轮（同一会话）已完成、本轮继续有效：2 台 worker 池（9222/9223，`-w0`/`-w1`）、
-403/401/5xx/502/transport 按 worker 故障重启 + 切备用（不加账号冷却）、429 保留配额冷却、
-SessionExpired 隔离 24h、`start.cmd` 前台 Ctrl+C、终端 LLM 日志、streaming JSON 修复、
-OpenAI 兼容端口、bypass/预填充/签名哨兵。
+上一轮（同一会话）已完成、已被第五轮部分取代：~~2 台 worker 池~~（已移除）、
+403/401/5xx/502/transport 按 worker 故障重启（现为单浏览器杀进程）、429 保留配额冷却
+（现收紧为第 5 次才冷却）、SessionExpired 隔离 24h、`start.cmd` 前台 Ctrl+C、
+终端 LLM 日志、streaming JSON 修复、OpenAI 兼容端口、bypass/预填充/签名哨兵。
 
 ### 6.2 关键真机证据（复现方法见 6.5）
 
@@ -376,8 +377,8 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
   `uv pip install --python .venv\Scripts\python.exe <pkg>`。
 - 运行期数据：`data/settings.json`（WebUI/`PUT /settings`，立即生效）、`data/accounts/<id>/auth.json`、
   `data/accounts/<id>/profile-wN`（worker profile，**同一 auth_file 不许共用**）。
-- 池默认 2 台：CDP `9222/9223`；**不要在服务运行时再起第二个网关碰这两个端口**。做隔离实验时用
-  `AISTUDIO_DATA_DIR=<临时目录>` + `AISTUDIO_BROWSER_PORT=95xx` + `AISTUDIO_BROWSER_POOL_SIZE=1`。
+- 单浏览器：CDP `9222`；**不要在服务运行时再起第二个网关碰这个端口**。做隔离实验时用
+  `AISTUDIO_DATA_DIR=<临时目录>` + `AISTUDIO_BROWSER_PORT=95xx`。
 - 主项目 `C:\build2api` 在 **8889** 跑着（用户自己的），**不要动它**；只读对比其
   `/__b2a/requests`（`Authorization: Bearer sk-123`）可以看到同通道的真实首包/总时长。
 - 额度：`gemini-4-argon` 日桶很小，**别拿它压测**；诊断用 `gemini-3.8-flash`。

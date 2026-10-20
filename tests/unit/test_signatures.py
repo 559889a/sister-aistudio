@@ -138,7 +138,7 @@ def _mock_capture_session() -> Any:
         return_value={
             "url": "https://example.com/generate",
             "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-3.7-flash",[[[[null,"hi"]],"user"]],null,'
+            "body": '["models/gemini-3.8-flash",[[[[null,"hi"]],"user"]],null,'
             '[null,null,null,128],"!orig"]',
         }
     )
@@ -164,7 +164,7 @@ async def test_capture_writes_sentinels_into_upstream_body(patch_settings):
         )
     ]
     captured = await service.capture(
-        prompt="hi", model="models/gemini-3.7-flash", contents=contents
+        prompt="hi", model="models/gemini-3.8-flash", contents=contents
     )
     assert captured is not None
     body = json.loads(captured.body)
@@ -191,7 +191,7 @@ async def test_capture_keeps_real_signature_when_switches_off(patch_settings):
         )
     ]
     captured = await service.capture(
-        prompt="hi", model="models/gemini-3.7-flash", contents=contents
+        prompt="hi", model="models/gemini-3.8-flash", contents=contents
     )
     assert captured is not None
     body = json.loads(captured.body)

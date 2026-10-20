@@ -62,32 +62,17 @@ _is_aistudio_page_url = is_aistudio_page_url
 SNAPSHOT_EVAL_TIMEOUT_S = 100.0
 
 
-def _suffixed_profile_dir(auth_file: str | None, profile_suffix: str) -> str | None:
-    """账号对应的 Chromium profile 目录；池模式下加 -w0/-w1 后缀隔离。
-
-    两台浏览器共用同一个 profile 目录会直接冲突（SingletonLock），所以同一份
-    auth_file 也必须按 worker 分目录：`.../profile` → `.../profile-w0`。
-    """
-    base = derive_profile_dir(auth_file)
-    if not base:
-        return None
-    return f"{base}{profile_suffix}" if profile_suffix else base
-
-
 class BrowserSession:
     """Coordinates browser lifecycle, readiness gate, and blue-green tab transitions."""
 
-    def __init__(
-        self, port: int, *, auth_file: str | None = None, profile_suffix: str = ""
-    ):
+    def __init__(self, port: int, *, auth_file: str | None = None):
         self.port = port
-        self._profile_suffix = profile_suffix or ""
         self._auth_file: str | None = (
             auth_file if auth_file is not None else (settings.auth_file or None)
         )
         self._auth_user: str | None = None
         self._tier: str | None = None
-        self._profile_dir = _suffixed_profile_dir(self._auth_file, self._profile_suffix)
+        self._profile_dir = derive_profile_dir(self._auth_file)
         self._proc: ChromiumProcess | None = None
         self._cdp_client: CDPClient | None = None
 
@@ -234,16 +219,6 @@ class BrowserSession:
         """Switch auth using blue-green transition without killing in-flight streams."""
         await self.transition_to_account(auth_file, force_refresh=True)
 
-    def set_account(self, auth_file: str | None) -> None:
-        """预设账号（不启动浏览器）：池里每个 worker 用自己的 auth_file。
-
-        供 ClientPool 在 ``warmup()`` 之前调用；profile 目录会按 profile_suffix 隔离。
-        """
-        self._auth_file = auth_file
-        self._auth_user = get_auth_user_from_meta(auth_file)
-        self._tier = get_tier_from_meta(auth_file)
-        self._profile_dir = _suffixed_profile_dir(auth_file, self._profile_suffix)
-
     @property
     def auth_file(self) -> str | None:
         return self._auth_file
@@ -251,10 +226,6 @@ class BrowserSession:
     @property
     def profile_dir(self) -> str | None:
         return self._profile_dir
-
-    @property
-    def profile_suffix(self) -> str:
-        return self._profile_suffix
 
     async def transition_to_account(
         self, auth_file: str | None, force_refresh: bool = False
@@ -277,8 +248,7 @@ class BrowserSession:
             self._auth_file = auth_file
             self._auth_user = target_auth_user
             self._tier = target_tier
-            # 池模式下每台浏览器必须有自己的 profile 目录（同一账号也不能共用）
-            self._profile_dir = _suffixed_profile_dir(auth_file, self._profile_suffix)
+            self._profile_dir = derive_profile_dir(auth_file)
             try:
                 # Real browser mode
                 if self._proc is None or not self._proc.is_alive():

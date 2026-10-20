@@ -107,7 +107,7 @@ async def test_session_blue_green_transition_preserves_inflight():
         snap_key="snap_old",
         auth_user="0",
         auth_file="/data/acc1.json",
-        base_template={"body": '["models/gemini-3.7-flash"]'},
+        base_template={"body": '["models/gemini-3.8-flash"]'},
         in_flight=1,
     )
     session._gate.set_ready(old_ctx)

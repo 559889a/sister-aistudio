@@ -224,7 +224,7 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | Run Chromium in headless mode |
 | `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | Browser idle reclamation timeout in seconds (900s on Termux, 1800s on Desktop; 0 disables) |
 | `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Dedicated proot-distro container name for Termux |
-| `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.7-flash` | Default text model |
+| `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.8-flash` | Default text model |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | Default image generation model |
 | `AISTUDIO_TIMEZONE` | string | Auto | Browser fingerprint & Wire protocol timezone (`America/Los_Angeles` by default) |
 | `AISTUDIO_LOCALE` | string | `en-US` | Browser fingerprint locale |
@@ -255,7 +255,7 @@ curl http://localhost:8080/v1beta/models \
 <summary><b>2. Generate Content (Non-streaming)</b></summary>
 
 ```bash
-curl http://localhost:8080/v1beta/models/gemini-3.7-flash:generateContent \
+curl http://localhost:8080/v1beta/models/gemini-3.8-flash:generateContent \
   -H "x-goog-api-key: your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -273,7 +273,7 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:generateContent \
 <summary><b>3. Stream Generate Content (SSE)</b></summary>
 
 ```bash
-curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?alt=sse \
+curl http://localhost:8080/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse \
   -H "x-goog-api-key: your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -306,7 +306,7 @@ client = genai.Client(
 
 # 1. Streaming response
 response = client.models.generate_content_stream(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="What is reactive programming?",
 )
 for chunk in response:
@@ -314,7 +314,7 @@ for chunk in response:
 
 # 2. Non-streaming response
 result = client.models.generate_content(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="Write a quicksort implementation in Python.",
 )
 print(result.text)
@@ -362,7 +362,7 @@ weather_tool = types.Tool(
 )
 
 response = client.models.generate_content(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
     contents="What is the weather in Tokyo right now?",
     config=types.GenerateContentConfig(tools=[weather_tool]),
 )

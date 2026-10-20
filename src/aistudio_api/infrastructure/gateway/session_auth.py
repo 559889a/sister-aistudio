@@ -26,7 +26,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 log = get_logger("session.auth")
 
 AI_STUDIO_URL = (
-    "https://aistudio.google.com/prompts/new_chat?model=gemini-3.7-flash&temporary=true"
+    "https://aistudio.google.com/prompts/new_chat?model=gemini-3.8-flash&temporary=true"
 )
 AI_STUDIO_URL_FALLBACK = (
     "https://aistudio.google.com/app/prompts/new_chat?temporary=true"
@@ -105,7 +105,7 @@ def get_tier_from_meta(auth_file: str | None) -> str:
 
 
 def get_aistudio_urls(
-    auth_user: str = "0", model: str = "gemini-3.7-flash"
+    auth_user: str = "0", model: str = "gemini-3.8-flash"
 ) -> list[str]:
     """Build AI Studio navigation URLs for target auth_user."""
     if auth_user and auth_user != "0":

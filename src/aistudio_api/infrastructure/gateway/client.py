@@ -65,13 +65,9 @@ class AIStudioClient:
         port: int = DEFAULT_BROWSER_PORT,
         *,
         auth_file: str | None = None,
-        profile_suffix: str = "",
     ):
         self.port = port
-        # 池模式：每台 worker 用自己的 auth_file + profile 后缀（-w0/-w1），互不踩 profile
-        self._session = BrowserSession(
-            port=port, auth_file=auth_file, profile_suffix=profile_suffix
-        )
+        self._session = BrowserSession(port=port, auth_file=auth_file)
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
         self._streaming_gateway = StreamingGateway(session=self._session)

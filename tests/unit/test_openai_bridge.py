@@ -389,7 +389,10 @@ def test_converted_request_encodes_into_wire_body():
         (2, "length"),
         (3, "content_filter"),
         (4, "content_filter"),
-        (6, "stop"),
+        # 5/6 对齐 bundle 一手枚举（2026-10-20 复核：5=OTHER、6=LANGUAGE，曾互换）
+        (5, "stop"),
+        (6, "content_filter"),
+        (18, "stop"),
         (None, "stop"),
     ],
 )

@@ -319,7 +319,7 @@ async def test_capture_service_single_pass_full_payload():
         return_value={
             "url": "https://example.com/generate",
             "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-3.7-flash",[[[[null,"hi"]],"user"]],null,[null,null,null,128],"!orig"]',
+            "body": '["models/gemini-3.8-flash",[[[[null,"hi"]],"user"]],null,[null,null,null,128],"!orig"]',
         }
     )
     mock_session.generate_snapshot = AsyncMock(return_value="!fresh_snapshot_token")
@@ -340,7 +340,7 @@ async def test_capture_service_single_pass_full_payload():
 
     captured = await capture_svc.capture(
         prompt="Hello from user",
-        model="models/gemini-3.7-flash",
+        model="models/gemini-3.8-flash",
         contents=contents,
         system_instruction_content=sys_inst,
         tools=tools,
@@ -351,7 +351,7 @@ async def test_capture_service_single_pass_full_payload():
     assert captured is not None
     assert captured.snapshot == "!fresh_snapshot_token"
     assert "You are a helpful assistant" in captured.body
-    assert "models/gemini-3.7-flash" in captured.body
+    assert "models/gemini-3.8-flash" in captured.body
 
 
 def test_is_login_page_url():
@@ -430,7 +430,7 @@ def test_browser_session_temporary_chat_urls():
     assert "temporary=true" in AI_STUDIO_URL
     assert "temporary=true" in AI_STUDIO_URL_FALLBACK
 
-    urls_default = get_aistudio_urls(auth_user="0", model="gemini-3.7-flash")
+    urls_default = get_aistudio_urls(auth_user="0", model="gemini-3.8-flash")
     assert all("temporary=true" in u for u in urls_default)
 
     urls_multi = get_aistudio_urls(auth_user="3", model="gemini-3.8-flash")
@@ -691,7 +691,7 @@ async def test_navigate_to_aistudio_re_navigates_after_cookie_reinjection(
         "https://accounts.google.com/v3/signin/identifier?"
         "continue=https://aistudio.google.com/prompts/new_chat"
     )
-    aistudio_url = "https://aistudio.google.com/prompts/new_chat?model=gemini-3.7-flash&temporary=true"
+    aistudio_url = "https://aistudio.google.com/prompts/new_chat?model=gemini-3.8-flash&temporary=true"
 
     goto_calls: list[str] = []
 

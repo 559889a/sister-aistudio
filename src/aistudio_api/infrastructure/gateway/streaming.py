@@ -185,7 +185,9 @@ class StreamingGateway:
                 # 「连头和状态都没拿到」还是「有响应头但迟迟没有正文」。
                 yield ("status", status_code)
             elif event_type == "chunk" and payload:
-                if pending_prefill:
+                # 只有确认 200 才把预填充发给客户端；错误状态带 body 的流
+                # 不能先吐一段正文再报错
+                if pending_prefill and status_code == 200:
                     yield ("body", pending_prefill)
                     pending_prefill = ""
                 if isinstance(payload, bytes):

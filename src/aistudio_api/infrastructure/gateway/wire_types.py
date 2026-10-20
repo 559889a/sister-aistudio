@@ -220,6 +220,17 @@ class AistudioGenerationConfig:
         self.values[idx] = value
 
     @property
+    def seed(self):
+        idx = GenerationConfigIndex.SEED
+        return self.values[idx] if len(self.values) > idx else None
+
+    @seed.setter
+    def seed(self, value):
+        idx = GenerationConfigIndex.SEED
+        self._ensure_len(idx + 1)
+        self.values[idx] = value
+
+    @property
     def output_resolution(self):
         idx = GenerationConfigIndex.OUTPUT_RESOLUTION
         return self.values[idx] if len(self.values) > idx else None
@@ -409,6 +420,7 @@ class AistudioRequest:
     evergreen_model_uri: str | None = None
     tool_config: list | None = None
     request_flag: int | None = None
-    cached_content: str | None = None
+    # field12：会话/续接 token（"v1_…"），不是 cachedContent——别往这里写别的
+    session_token: str | None = None
     location: list | None = None
     raw_body: list = field(default_factory=list)

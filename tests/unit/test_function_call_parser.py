@@ -216,7 +216,7 @@ def test_chat_service_does_not_convert_signed_text_into_thought():
             )
         ]
     )
-    normalized = normalize_gemini_request(req, "gemini-3.7-flash")
+    normalized = normalize_gemini_request(req, "gemini-3.8-flash")
     part = normalized.contents[0].parts[0]
     assert part.text == "Normal answer"
     assert part.thought is False

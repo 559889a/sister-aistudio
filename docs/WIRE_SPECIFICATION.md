@@ -51,8 +51,8 @@ Google AI Studio 在 Web 端（`alkalimakersuite-pa.clients6.google.com`）与�
 | **`6`** | Field 7 | `tools` | `list \| null` | 工具声明列表（内置工具与自定义函数） |
 | **`7`** | Field 8 | `evergreen_model_uri` | `string \| null` | 动态常青模型 URI（如 `"models/gemini-..."`） |
 | **`10`** | Field 11 | `request_flag` | `int` | 请求行为标记，固定值 `1` |
-| **`11`** | Field 12 | `cached_content` | `string \| null` | 缓存上下文名称 |
-| **`13`** | Field 14 | `location` | `list \| null` | 用户位置与时区声明，如 `[[null, null, "Asia/Tokyo"], null, 1]` |
+| **`11`** | Field 12 | `session_token` | `string \| null` | **会话/续接 token**（真机 body 为 `"v1_…"`，非 cachedContent——2026-10-20 bundle 复核；往这里写别的会顶掉续接上下文） |
+| **`13`** | Field 14 | `location` | `list \| null` | 含时区声明，如 `[[null, null, "Asia/Tokyo"], null, 1]`（bundle 语义标注为 ToolConfig 类字段；仓库按真机 body 原样回写，不改形状） |
 
 ---
 
@@ -117,7 +117,8 @@ Google AI Studio 在 Web 端（`alkalimakersuite-pa.clients6.google.com`）与�
 | **`10`** | `frequency_penalty` | `float \| null` | 频率惩罚系数 |
 | **`11`** | `response_logprobs` | `bool \| null` | 是否返回 Logprobs |
 | **`12`** | `logprobs` | `int \| null` | Logprobs 候选数 |
-| **`14`** | `image_output_mode` | `list[int] \| null` | 生图输出模式：`[2]` (仅图片) 或 `[2, 1]` (图文混合) |
+| **`14`** | `image_output_mode` | `list[int] \| null` | 真实语义是 **responseModalities**（repeated 枚举 1=TEXT/2=IMAGE/3=AUDIO）：`[2]` (仅图片) 或 `[2, 1]` (图文混合)；表达 AUDIO 时须按枚举写值 |
+| **`18`** | `seed` | `int \| null` | 随机种子（bundle 写入点 `tUa=Sk(a,19,b)` ← `d.seed()`；2026-10-20 补齐，此前被静默丢弃） |
 | **`16`** | `thinking_config` | `list \| null` | 思考模式：`[mode, null, null, level]`（`1`=LOW, `2`=MEDIUM, `3`=HIGH, `4`=MINIMAL） |
 | **`17`** | `media_resolution` | `int \| null` | 多模态输入分辨率：`1`=LOW, `2`=MEDIUM, `3`=HIGH |
 | **`26`** | `output_resolution` | `list[str] \| null` | 生图分辨率配置，如 `["1:1", "1K"]` |
@@ -296,7 +297,10 @@ Google AI Studio 响应为 Protobuf JSON 数组，每个流式分块或单次响
 
 ### 7.4 FinishReason 完整状态码映射表
 
-上游 Protobuf 在 Candidate 的 Field 2 (下标 `1`) 返回整数代码，对应 Google API 标准字符串枚举：
+上游 Protobuf 在 Candidate 的 Field 2 (下标 `1`) 返回整数代码，对应 Google API 标准字符串枚举。
+下表已按 2026-10-20 bundle 一手证据修正（此前 5/6 互换、15/16/17 错位一格、缺 18；
+证据：页面错误文案 Map `mcf` + `finishReason()===2` 配 `maxTotalTokens()`，见
+`逆向相关内容/independent-re-2026-10-20.md`）：
 
 | 代码 | 标准枚举值 | 说明 |
 |---|---|---|
@@ -305,8 +309,8 @@ Google AI Studio 响应为 Protobuf JSON 数组，每个流式分块或单次响
 | `2` | `MAX_TOKENS` | 达到最大输出 Token 上限 |
 | `3` | `SAFETY` | 触发安全过滤策略拦截 |
 | `4` | `RECITATION` | 触发版权/原文背诵拦截 |
-| `5` | `LANGUAGE` | 不支持的语言策略拦截 |
-| `6` | `OTHER` | 其他终止原因 |
+| `5` | `OTHER` | 其他终止原因 |
+| `6` | `LANGUAGE` | 不支持的语言策略拦截 |
 | `7` | `BLOCKLIST` | 触发禁用词黑名单 |
 | `8` | `PROHIBITED_CONTENT` | 触发违规有害内容拦截 |
 | `9` | `SPII` | 敏感个人身份信息拦截 |
@@ -315,9 +319,10 @@ Google AI Studio 响应为 Protobuf JSON 数组，每个流式分块或单次响
 | `12` | `UNEXPECTED_TOOL_CALL` | 意外的工具调用 |
 | `13` | `TOO_MANY_TOOL_CALLS` | 工具链连续调用超限退出 |
 | `14` | `IMAGE_PROHIBITED_CONTENT` | 图片包含违规内容 |
-| `15` | `NO_IMAGE` | 预期生图但未生成 |
-| `16` | `IMAGE_RECITATION` | 生图版权来源相似度拦截 |
-| `17` | `IMAGE_OTHER` | 生图其他未知原因终止 |
+| `15` | `IMAGE_OTHER` | 生图其他未知错误终止 |
+| `16` | `NO_IMAGE` | 预期生图但未生成 |
+| `17` | `IMAGE_RECITATION` | 生图版权来源相似度拦截 |
+| `18` | `MISSING_THOUGHT_SIGNATURE` | 缺思维链签名（当前构建新枚举） |
 
 AI Studio Web 核心过滤数组：
 `hCb = [0, 3, 4, 5, 7, 8, 9, 11, 14, 15, 17]`

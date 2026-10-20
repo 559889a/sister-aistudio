@@ -96,7 +96,7 @@ _FALLBACK_MODELS = [
         "description": "Latest Gemini 3.8 Flash model",
     },
     {
-        "id": "gemini-3.7-flash",
+        "id": "gemini-3.8-flash",
         "displayName": "Gemini 3.7 Flash",
         "description": "Gemini 3.7 Flash default text model",
     },
@@ -421,7 +421,7 @@ class ModelDiscoveryService:
         for item in raw_data[0]:
             if not isinstance(item, list) or not item or not isinstance(item[0], str):
                 continue
-            raw_id = item[0]  # e.g. "models/gemini-3.7-flash"
+            raw_id = item[0]  # e.g. "models/gemini-3.8-flash"
             model_id = raw_id.replace("models/", "")
             version = (
                 str(item[2]).strip()

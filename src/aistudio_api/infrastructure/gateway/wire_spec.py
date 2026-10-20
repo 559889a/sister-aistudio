@@ -19,9 +19,13 @@ class TopLevelIndex(IntEnum):
     SNAPSHOT = 4
     SYSTEM_INSTRUCTION = 5
     TOOLS = 6
+    # field8：当前构建无写入点、语义未证实（旧文档叫 evergreen_model_uri）——只透传模板值
     EVERGREEN_MODEL_URI = 7
     REQUEST_FLAG = 10
-    CACHED_CONTENT = 11
+    # field12：会话/续接 token（真机 body 为 "v1_…"），**不是** cachedContent；
+    # 往这里写别的东西会顶掉页面的续接上下文（2026-10-20 bundle 复核）
+    SESSION_TOKEN = 11
+    # field14：含时区信息的工具/位置配置；按真机 body 原样回写 [[null,null,"<TZ>"]]
     LOCATION = 13
 
 
@@ -46,8 +50,8 @@ class PartIndex(IntEnum):
 class GenerationConfigIndex(IntEnum):
     """Indexes in the generationConfig array.
 
-    语义标注经 2026-10-20 独立逆向复核（当前 bundle 的 setter 链 kUa..yUa + fixtures
-    双向验证，见 逆向相关内容/re-verification-2026-10-20.md）；「无当前构建证据」的
+    语义标注经 2026-10-20 bundle 一手证据复核（setter 链 kUa..yUa + fixtures，
+    见 逆向相关内容/independent-re-2026-10-20.md）；「无当前构建证据」的
     槽位保留编号但别当既定字段用。
     """
 
@@ -70,6 +74,8 @@ class GenerationConfigIndex(IntEnum):
     IMAGE_OUTPUT_MODE = 14
     THINKING_CONFIG = 16
     MEDIA_RESOLUTION = 17
+    # field19：seed（bundle 写入点 tUa=Sk(a,19,b) ← d.seed()）
+    SEED = 18
     OUTPUT_RESOLUTION = 26
 
 

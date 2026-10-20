@@ -318,24 +318,23 @@ def test_account_stats_session_expired_permanent_isolation():
     assert stats.is_available("gemini-3.8-flash")
 
 
-def test_account_stats_short_cooldown_sync():
-    """Verify short 60s cooldown is tracked accurately for monitoring."""
+def test_account_stats_cooldown_only_after_fifth_rate_limit():
+    """防误杀（用户 2026-10-20）：前 4 次 429 不冷却不换号，第 5 次才打入冷宫。"""
     stats = AccountStats(account_id="acc_test")
-    stats.record_rate_limited(model="gemini-2.5-flash")
+    for _ in range(4):
+        stats.record_rate_limited(model="gemini-2.5-flash")
+        assert stats.is_available("gemini-2.5-flash")
 
-    assert not stats.is_available("gemini-2.5-flash")
-    rem = stats.get_cooldown_remaining("gemini-2.5-flash")
-    assert 0 < rem <= 60.0
-
-    stats.record_rate_limited(model="gemini-2.5-flash")
-    assert not stats.is_available("gemini-2.5-flash")
-    rem2 = stats.get_cooldown_remaining("gemini-2.5-flash")
-    assert 0 < rem2 <= 60.0
-
+    # 第 5 次：打入冷宫，冷却到美西午夜
     stats.record_rate_limited(model="gemini-2.5-flash")
     assert not stats.is_available("gemini-2.5-flash")
-    rem3 = stats.get_cooldown_remaining("gemini-2.5-flash")
-    assert rem3 > 60.0
+    assert stats.get_cooldown_remaining("gemini-2.5-flash") > 60.0
+
+    # 成功一次就清零 429 计数：下一个 429 不会再立刻触发冷却
+    stats.record_success(model="gemini-2.5-flash")
+    assert stats.is_available("gemini-2.5-flash")
+    stats.record_rate_limited(model="gemini-2.5-flash")
+    assert stats.is_available("gemini-2.5-flash")
 
 
 def test_safe_account_dir_path_traversal_rejection(tmp_path):

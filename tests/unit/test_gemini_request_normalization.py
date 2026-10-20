@@ -713,7 +713,7 @@ def test_normalize_gemini_request_parameters_json_schema_for_omp_tools():
         }
     )
 
-    normalized = normalize_gemini_request(req, "models/gemini-3.7-flash")
+    normalized = normalize_gemini_request(req, "models/gemini-3.8-flash")
     assert normalized.tools is not None
     assert len(normalized.tools) == 1
     # Function declarations tool is at index 1
@@ -812,7 +812,7 @@ def test_normalize_gemini_request_preserves_system_instruction_thought_signature
             },
         }
     )
-    normalized = normalize_gemini_request(req, "gemini-3.7-flash")
+    normalized = normalize_gemini_request(req, "gemini-3.8-flash")
     assert normalized.system_instruction is not None
     assert len(normalized.system_instruction.parts) == 1
     sys_part = normalized.system_instruction.parts[0]
@@ -832,7 +832,7 @@ def test_normalize_gemini_request_deduplicates_and_covers_builtin_tools():
             ],
         }
     )
-    normalized = normalize_gemini_request(req, "gemini-3.7-flash")
+    normalized = normalize_gemini_request(req, "gemini-3.8-flash")
     # tools should have codeExecution and googleSearch, but googleSearch must not be duplicated!
     assert normalized.tools is not None
     # code_execution = [[]], google_search = [None, None, None, [None, [[]]]]

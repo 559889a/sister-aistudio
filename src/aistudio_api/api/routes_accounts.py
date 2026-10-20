@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path as FastApiPath
 from pydantic import BaseModel, Field
@@ -28,15 +28,6 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 log = get_logger("accounts")
 
 router = APIRouter(prefix="/accounts")
-
-
-def _pool_client(client: object) -> Any | None:
-    """pool 模式客户端（显式 ``is_pool=True`` 标记）；单浏览器/测试替身返回 None。
-
-    返回 Any：ClientPool 与测试替身都是鸭子类型（同 api_service 的 _pool_hook）。
-    不能用 ``hasattr``：普通 ``MagicMock`` 对任意属性都返回 Mock，会被误判成 pool。
-    """
-    return client if getattr(client, "is_pool", False) is True else None
 
 
 class AccountResponse(BaseModel):
@@ -148,25 +139,15 @@ async def activate_account(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> AccountResponse:
     """切换到指定账号。"""
-    pool = _pool_client(runtime_state.client)
-    if pool is not None:
-        # 池模式：必须重绑所有 worker，只切主 worker 会让另一台继续挂在旧账号上
-        account = account_service.get_account(account_id)
-        if account is None:
-            raise HTTPException(status_code=404, detail="账号不存在")
-        if not await pool.activate_account(account_id):
-            raise HTTPException(status_code=503, detail="worker 账号重绑失败")
-        account_service.set_active_account(account_id)
-    else:
-        client = runtime_state.client
-        browser_session = client._session if client else None
+    client = runtime_state.client
+    browser_session = client._session if client else None
 
-        if browser_session is None:
-            raise HTTPException(status_code=503, detail="服务未就绪")
+    if browser_session is None:
+        raise HTTPException(status_code=503, detail="服务未就绪")
 
-        account = await account_service.activate_account(account_id, browser_session)
-        if account is None:
-            raise HTTPException(status_code=404, detail="账号不存在或切换失败")
+    account = await account_service.activate_account(account_id, browser_session)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在或切换失败")
     if runtime_state.rotator:
         runtime_state.rotator.add_account(account.id)
         runtime_state.rotator.clear_cooldown(account.id)
@@ -238,12 +219,10 @@ async def detect_account_email(
             log.debug("通过 HTTP 探测账号 %s 邮箱/等级失败: %s", account_id, e)
 
     # 3. 若 HTTP 仍未取到邮箱且受控浏览器可用，回退切换浏览器会话提取
-    # （池模式跳过：switch_auth 只会切主 worker，把 worker.account_id 与实际会话拆开）
     if (
         not email
         and browser_session is not None
         and browser_session.page is not None
-        and _pool_client(runtime_state.client) is None
     ):
         if target_auth and str(target_auth) != browser_session._auth_file:
             await browser_session.switch_auth(str(target_auth))
@@ -322,16 +301,9 @@ async def detect_account_tier(
 async def _reassign_active_after_delete(
     account_service: AccountService, runtime_state: RuntimeState
 ) -> None:
-    """删除活跃账号后的重排：池模式重绑所有 worker，单浏览器切到剩余第一个账号。"""
+    """删除活跃账号后的重排：切到剩余第一个账号（浏览器蓝绿热切）。"""
     remaining_accounts = account_service.list_accounts()
     new_active = remaining_accounts[0] if remaining_accounts else None
-    pool = _pool_client(runtime_state.client)
-    if pool is not None:
-        if new_active is not None:
-            account_service.set_active_account(new_active.id)
-        # 把仍指向已删账号的 worker 重绑到剩余账号（READY 蓝绿热切）
-        await pool.redistribute_accounts()
-        return
     client = runtime_state.client
     browser_session = client._session if client else None
     if new_active is not None:
@@ -538,14 +510,9 @@ async def probe_and_import(
 
     client_obj = getattr(runtime_state, "client", None)
     if not had_active_account and metas and client_obj is not None:
-        pool = _pool_client(client_obj)
-        if pool is not None:
-            if await pool.activate_account(metas[0].id):
-                account_service.set_active_account(metas[0].id)
-        else:
-            browser_session = client_obj._session
-            if browser_session is not None:
-                await account_service.activate_account(metas[0].id, browser_session)
+        browser_session = client_obj._session
+        if browser_session is not None:
+            await account_service.activate_account(metas[0].id, browser_session)
     log.info("探活与导入完成: 成功导入 %d 个账号", len(imported_accounts))
     return ProbeAndImportResponse(
         imported_count=len(imported_accounts),

@@ -455,7 +455,7 @@ def _mock_capture_session() -> Any:
         return_value={
             "url": "https://example.com/generate",
             "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-3.7-flash",[[[[null,"hi"]],"user"]],null,'
+            "body": '["models/gemini-3.8-flash",[[[[null,"hi"]],"user"]],null,'
             '[null,null,null,128],"!orig"]',
         }
     )
@@ -474,7 +474,7 @@ async def test_capture_applies_prefill_bypass_and_snapshot_after_rewrite(patch_s
     ]
 
     captured = await service.capture(
-        prompt="hi", model="models/gemini-3.7-flash", contents=contents
+        prompt="hi", model="models/gemini-3.8-flash", contents=contents
     )
     assert captured is not None
     assert captured.prefill_text == "<thinking>开头"
@@ -531,7 +531,7 @@ async def test_capture_system_position_injects_into_system_instruction(patch_set
     system = AistudioContent(role="user", parts=[AistudioPart(text="sys prompt")])
     captured = await service.capture(
         prompt="hi",
-        model="models/gemini-3.7-flash",
+        model="models/gemini-3.8-flash",
         contents=[AistudioContent(role="user", parts=[AistudioPart(text="hi")])],
         system_instruction_content=system,
     )
@@ -557,7 +557,7 @@ async def test_capture_respects_custom_instruction_and_tool_prefix(patch_setting
     service = RequestCaptureService(session)
     captured = await service.capture(
         prompt="hi",
-        model="models/gemini-3.7-flash",
+        model="models/gemini-3.8-flash",
         contents=[AistudioContent(role="user", parts=[AistudioPart(text="hi")])],
     )
     assert captured is not None and captured.bypass_plan is not None
@@ -584,7 +584,7 @@ async def test_capture_prefill_off_leaves_request_untouched(patch_settings):
         AistudioContent(role="model", parts=[AistudioPart(text="prefill")]),
     ]
     captured = await service.capture(
-        prompt="hi", model="models/gemini-3.7-flash", contents=contents
+        prompt="hi", model="models/gemini-3.8-flash", contents=contents
     )
     assert captured is not None
     assert captured.prefill_text == ""

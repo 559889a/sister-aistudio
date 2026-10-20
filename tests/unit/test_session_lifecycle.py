@@ -109,13 +109,13 @@ async def test_session_template_capture_universal_bootstrap():
             base_template={
                 "url": "http://bootstrap.com",
                 "headers": {},
-                "body": '["models/gemini-3.7-flash"]',
+                "body": '["models/gemini-3.8-flash"]',
             },
         )
     )
 
     # 3.7-flash uses bootstrap
-    tpl1 = await session.capture_template("gemini-3.7-flash")
+    tpl1 = await session.capture_template("gemini-3.8-flash")
     assert tpl1["url"] == "http://bootstrap.com"
 
     # Other models ALSO use bootstrap now, saving 30 seconds

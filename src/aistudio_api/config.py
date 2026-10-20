@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # 加载 .env 文件（如果存在）
 load_dotenv()
 
-DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemini-3.7-flash")
+DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemini-3.8-flash")
 DEFAULT_IMAGE_MODEL = os.getenv(
     "AISTUDIO_DEFAULT_IMAGE_MODEL", "gemini-3.1-flash-image-preview"
 )
@@ -43,14 +43,6 @@ def _load_int_env(*names: str, default: int) -> int:
         return default
     return int(value)
 
-
-def clamp_pool_size(value: int) -> int:
-    """浏览器 worker 池大小夹在 1..4（1 = 旧的单浏览器路径）。"""
-    try:
-        size = int(value)
-    except (TypeError, ValueError):
-        return 1
-    return max(1, min(4, size))
 
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
@@ -264,10 +256,6 @@ class Settings:
     host: str = os.getenv("AISTUDIO_HOST", "0.0.0.0")
     browser_port: int = _load_int_env(
         "AISTUDIO_BROWSER_PORT", default=DEFAULT_BROWSER_PORT
-    )
-    # 浏览器 worker 池大小：1 = 旧的单浏览器路径（兼容）；2+ = 多台 Chromium 负载均衡。
-    browser_pool_size: int = clamp_pool_size(
-        _load_int_env("AISTUDIO_BROWSER_POOL_SIZE", default=2)
     )
     browser_headless: bool = _load_bool_env("AISTUDIO_BROWSER_HEADLESS", default=True)
     browser_executable_path: str | None = os.getenv("AISTUDIO_BROWSER_EXECUTABLE")

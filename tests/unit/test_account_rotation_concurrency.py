@@ -109,20 +109,21 @@ async def test_capture_service_ephemeral_signature_identical_prompts():
 
 @pytest.mark.asyncio
 async def test_account_stats_per_model_cooldown():
-    """测试账号在特定模型上的 429 冷却与隔离。"""
+    """账号在特定模型上的 429 冷却与隔离：第 5 次才隔离，且不影响其他模型。"""
     stats = AccountStats(account_id="acc_1")
     assert stats.is_available("gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-flash")
 
-    # 对 pro 模型限流
-    stats.record_rate_limited(model="gemini-2.5-pro")
+    # 对 pro 模型累计 5 次 429（前 4 次只计数不冷却，防误杀）
+    for _ in range(5):
+        stats.record_rate_limited(model="gemini-2.5-pro")
     assert not stats.is_available("gemini-2.5-pro")
     # flash 模型依然可用！
     assert stats.is_available("gemini-2.5-flash")
     assert stats.get_cooldown_remaining("gemini-2.5-pro") > 0
     assert stats.get_cooldown_remaining("gemini-2.5-flash") == 0
 
-    # 成功请求清除偶发冷却
+    # 成功请求清除冷却
     stats.record_success(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
 
@@ -140,12 +141,11 @@ async def test_account_stats_pacific_midnight_reset():
 
 @pytest.mark.asyncio
 async def test_account_stats_clear_cooldown_resets_counter():
-    """测试手动清除冷却会重置 429 次数计数器，不会在下一次 429 时直接秒锁至午夜。"""
+    """手动清除冷却会重置 429 计数器：下一次 429 只计数，要再累计 5 次才重新锁定。"""
     stats = AccountStats(account_id="acc_1")
-    # 连续 3 次 429 触发当日锁定
-    stats.record_rate_limited(model="gemini-2.5-pro")
-    stats.record_rate_limited(model="gemini-2.5-pro")
-    stats.record_rate_limited(model="gemini-2.5-pro")
+    # 连续 5 次 429 触发当日锁定（打入冷宫）
+    for _ in range(5):
+        stats.record_rate_limited(model="gemini-2.5-pro")
     assert not stats.is_available("gemini-2.5-pro")
     assert stats.get_cooldown_remaining("gemini-2.5-pro") > 60.0
 
@@ -154,10 +154,9 @@ async def test_account_stats_clear_cooldown_resets_counter():
     assert stats.is_available("gemini-2.5-pro")
     assert "gemini-2.5-pro" not in stats.model_rate_limited
 
-    # 下一次遇到 429 应重新享有 60s 临时冷却，而不是直接锁到午夜
+    # 下一次 429 只计数不冷却（防误杀），要再累计 5 次才会重新锁定
     stats.record_rate_limited(model="gemini-2.5-pro")
-    rem = stats.get_cooldown_remaining("gemini-2.5-pro")
-    assert 0 < rem <= 60.0
+    assert stats.is_available("gemini-2.5-pro")
 
 
 @pytest.mark.asyncio
@@ -188,7 +187,7 @@ async def test_rotator_sticky_mode():
     assert next_acc is not None
     assert next_acc.id == "acc_1"
 
-    # acc1 在 pro 模型上发生 429
+    # acc1 在 pro 模型上发生一次 429（第 1 次：只计数不冷却，防误杀）
     rotator.record_rate_limited("acc_1", model="gemini-2.5-pro")
 
     # 请求 flash 模型，acc1 依然可用，继续复用 acc1！
@@ -198,7 +197,16 @@ async def test_rotator_sticky_mode():
     assert next_acc is not None
     assert next_acc.id == "acc_1"
 
-    # 请求 pro 模型，acc1 不可用，自动切换到 acc2！
+    # 请求 pro 模型：单次 429 不换号，仍复用 acc1
+    next_acc = await rotator.get_next_account(
+        model="gemini-2.5-pro", current_account_id=acc1.id
+    )
+    assert next_acc is not None
+    assert next_acc.id == "acc_1"
+
+    # 累计第 5 次 429：acc1 在 pro 上被打入冷宫，请求 pro 自动切换到 acc2！
+    for _ in range(4):
+        rotator.record_rate_limited("acc_1", model="gemini-2.5-pro")
     next_acc = await rotator.get_next_account(
         model="gemini-2.5-pro", current_account_id=acc1.id
     )
@@ -397,7 +405,7 @@ async def test_capture_model_preservation_when_template_differs():
         return_value={
             "url": "https://example.com/generate",
             "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-3.7-flash",[[[[null,"template prompt"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"old_snap"]',
+            "body": '["models/gemini-3.8-flash",[[[[null,"template prompt"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"old_snap"]',
         }
     )
     service = RequestCaptureService(session=mock_session)
@@ -407,7 +415,7 @@ async def test_capture_model_preservation_when_template_differs():
         model="models/gemini-3.8-flash",
     )
     assert captured is not None
-    # 确认 captured.model 是用户请求的模型，而不是模板的 gemini-3.7-flash
+    # 确认 captured.model 是用户请求的模型，而不是模板的 gemini-3.8-flash
     assert captured.model == "models/gemini-3.8-flash"
     import json
 
