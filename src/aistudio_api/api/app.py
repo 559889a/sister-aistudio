@@ -54,10 +54,40 @@ async def lifespan(_app: FastAPI):
 
     install_process_cleanup_handlers()
 
-    # 单浏览器（用户 2026-10-20 拍板：不再要浏览器 worker 池）；账号池保留——
-    # 多账号在这台浏览器上轮换（蓝绿热切，在途流不中断）。
-    client = AIStudioClient(port=runtime_state.browser_port)
-    runtime_state.client = client
+    # 上游通道选择（2026-10-20 用户指派引入）：aistudio（默认，浏览器+账号池）/
+    # vertex_express（官方 Key 直连）/ console_graphql（Cloud 控制台 Cookie 直连）。
+    # 后两条无浏览器、无账号池语义，错误原样透传、零自动重试。
+    upstream_mode = str(getattr(settings, "upstream_mode", "aistudio") or "aistudio").lower()
+    if upstream_mode == "vertex_express":
+        from aistudio_api.infrastructure.upstreams.vertex_express import (
+            VertexExpressClient,
+        )
+
+        client = VertexExpressClient(
+            settings.vertex_express_api_key,
+            project_id=settings.google_project_id,
+            location=settings.express_location,
+            proxy_url=settings.proxy_url,
+        )
+        runtime_state.client = client
+        logger.info("Client initialized (upstream=vertex_express)")
+    elif upstream_mode == "console_graphql":
+        from aistudio_api.infrastructure.upstreams.console_graphql import (
+            ConsoleGraphqlClient,
+        )
+
+        client = ConsoleGraphqlClient(
+            settings.console_cookie,
+            settings.console_project_id,
+            proxy_url=settings.proxy_url,
+        )
+        runtime_state.client = client
+        logger.info("Client initialized (upstream=console_graphql)")
+    else:
+        # 单浏览器（用户 2026-10-20 拍板：不再要浏览器 worker 池）；账号池保留——
+        # 多账号在这台浏览器上轮换（蓝绿热切，在途流不中断）。
+        client = AIStudioClient(port=runtime_state.browser_port)
+        runtime_state.client = client
 
     # 初始化账号管理服务
     account_store = AccountStore()

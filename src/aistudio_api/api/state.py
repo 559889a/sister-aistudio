@@ -15,6 +15,12 @@ if TYPE_CHECKING:
     from aistudio_api.application.account_rotator import AccountRotator
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
+    from aistudio_api.infrastructure.upstreams.console_graphql import (
+        ConsoleGraphqlClient,
+    )
+    from aistudio_api.infrastructure.upstreams.vertex_express import (
+        VertexExpressClient,
+    )
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -35,7 +41,8 @@ class ModelStatsItem:
 
 @dataclass
 class RuntimeState:
-    client: AIStudioClient | None = None
+    # 上游通道可以换实现（aistudio/vertex_express/console_graphql），调用面一致
+    client: AIStudioClient | VertexExpressClient | ConsoleGraphqlClient | None = None
     browser_port: int = 9222
     account_service: AccountService | None = None
     rotator: AccountRotator | None = None

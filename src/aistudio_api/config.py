@@ -276,6 +276,13 @@ class Settings:
     config_file: str = str(resolve_config_file())
     persist_stats: bool = _load_bool_env("AISTUDIO_PERSIST_STATS", default=True)
     persist_rotator: bool = _load_bool_env("AISTUDIO_PERSIST_ROTATOR", default=True)
+    # ── 上游通道（2026-10-20 引入 vertex2openai 的两条上游；默认仍是浏览器通道）──
+    upstream_mode: str = os.getenv("AISTUDIO_UPSTREAM", "aistudio").strip().lower() or "aistudio"
+    vertex_express_api_key: str = os.getenv("VERTEX_EXPRESS_API_KEY", "")
+    google_project_id: str = os.getenv("GOOGLE_PROJECT_ID", "")
+    express_location: str = os.getenv("AISTUDIO_EXPRESS_LOCATION", "")
+    console_cookie: str = os.getenv("AISTUDIO_CONSOLE_COOKIE", "")
+    console_project_id: str = os.getenv("AISTUDIO_CONSOLE_PROJECT_ID", "")
     dump_requests: bool = _load_dump_requests_env()
     dump_to_file: bool = _load_dump_to_file_env()
     dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))
