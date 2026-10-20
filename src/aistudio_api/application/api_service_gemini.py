@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+import traceback
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -45,7 +46,9 @@ from aistudio_api.domain.errors import (
     parse_upstream_grpc_error,
 )
 from aistudio_api.domain.models import ModelOutput
+from aistudio_api.infrastructure.browser.scripts import PROMPT_STATE_JS
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
+from aistudio_api.infrastructure.utils.incidents import record_incident
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.request_context import get_request_id
 
@@ -176,6 +179,57 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
     return 500, str(exc), "INTERNAL"
 
 
+async def _capture_failure_evidence(
+    exc: Exception,
+    *,
+    client: AIStudioClient,
+    http_status: int,
+    error_type: str,
+    model: str,
+    attempt_elapsed_s: float | None,
+) -> None:
+    """偶发故障现场落盘（500/403/502 攻坚，2026-10-20）：必须在重启浏览器**之前**调。
+
+    探针拿失败瞬间的页面状态（hook/WAA/输入框），连同上游原始错误体、
+    CDP 网络层证据一起写进 data/incidents.jsonl。全部 best-effort：
+    探针失败记下失败原因，落盘失败只 WARN，绝不影响既有错误路径。
+    """
+    page_state: dict[str, object] | str = {}
+    session = getattr(client, "_session", None)
+    page = getattr(session, "page", None)
+    if page is None or (callable(getattr(page, "is_closed", None)) and page.is_closed()):
+        page_state = {"page": "closed-or-missing"}
+    else:
+        try:
+            state = await page.evaluate(PROMPT_STATE_JS, timeout_s=2.0)
+            page_state = state if isinstance(state, dict) else {"probe": str(state)}
+        except Exception as probe_exc:
+            page_state = {"probe_failed": str(probe_exc)}
+    net = getattr(exc, "net_evidence", None)
+    if not net and page is not None:
+        raw_failures = getattr(page, "rpc_net_failures", None)
+        if isinstance(raw_failures, list):
+            net = raw_failures[-8:]
+    record_incident(
+        "request_failure",
+        {
+            "rid": get_request_id() or "",
+            "http_status": http_status,
+            "error_type": error_type,
+            "error_class": type(exc).__name__,
+            "message": str(exc)[:1000],
+            "model": model,
+            "elapsed_s": (
+                round(attempt_elapsed_s, 1) if attempt_elapsed_s is not None else None
+            ),
+            "page_state": page_state,
+            "net_evidence": net,
+            "raw_upstream_body": getattr(exc, "raw_upstream_body", "") or "",
+            "traceback": traceback.format_exc()[:4000],
+        },
+    )
+
+
 async def handle_attempt_exception(
     exc: Exception,
     *,
@@ -215,6 +269,10 @@ async def handle_attempt_exception(
     if isinstance(exc, SessionExpiredError):
         logger.warning("%s账号会话失效，已被重定向到登录页: %s", _rid(), exc)
         record_rotator_event("session_expired", model=target_model)
+        await _capture_failure_evidence(
+            exc, client=client, http_status=401, error_type="auth_error",
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+        )
         await _restart_browser()
         raise HTTPException(
             401,
@@ -230,6 +288,10 @@ async def handle_attempt_exception(
         )
         # 403/401 不是配额问题（2026-10-19 拍板）：不换号、不加账号冷却，按浏览器故障重启
         record_rotator_event("error", model=target_model)
+        await _capture_failure_evidence(
+            exc, client=client, http_status=403, error_type="auth_error",
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+        )
         await _restart_browser()
         raise HTTPException(
             403, detail={"message": str(exc), "type": "auth_error"}
@@ -258,6 +320,10 @@ async def handle_attempt_exception(
             _fmt_elapsed(attempt_elapsed_s),
             clean_upstream_error_message(str(exc)),
         )
+        await _capture_failure_evidence(
+            exc, client=client, http_status=502, error_type="upstream_error",
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+        )
         await _restart_browser()
         raise HTTPException(
             502,
@@ -277,6 +343,10 @@ async def handle_attempt_exception(
         )
         client.clear_templates()
         record_rotator_event("error", model=target_model)
+        await _capture_failure_evidence(
+            exc, client=client, http_status=502, error_type="upstream_error",
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+        )
         await _restart_browser()
         raise HTTPException(
             502, detail={"message": str(exc), "type": "upstream_error"}
@@ -299,6 +369,10 @@ async def handle_attempt_exception(
             if status_code == 404
             else "upstream_error"
         )
+        await _capture_failure_evidence(
+            exc, client=client, http_status=status_code, error_type=error_type,
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+        )
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
         ) from exc
@@ -308,6 +382,10 @@ async def handle_attempt_exception(
         record_rotator_event("error", model=target_model)
         logger.warning(
             "%sGemini 服务端异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
+        )
+        await _capture_failure_evidence(
+            exc, client=client, http_status=500, error_type="server_error",
+            model=target_model, attempt_elapsed_s=attempt_elapsed_s,
         )
         raise HTTPException(
             500, detail={"message": str(exc), "type": "server_error"}
@@ -319,6 +397,10 @@ async def handle_attempt_exception(
         "%sGemini 未知严重异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
     )
     logger.debug("Gemini 异常堆栈详情:", exc_info=True)
+    await _capture_failure_evidence(
+        exc, client=client, http_status=500, error_type="server_error",
+        model=target_model, attempt_elapsed_s=attempt_elapsed_s,
+    )
     raise HTTPException(
         500, detail={"message": str(exc), "type": "server_error"}
     ) from exc

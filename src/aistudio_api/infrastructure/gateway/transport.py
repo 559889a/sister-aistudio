@@ -111,6 +111,13 @@ def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:
     )
 
 
+def _transport_error(page: CDPPage, message: str) -> BrowserTransportError:
+    """BrowserTransportError + 附上已采集的 CDP 网络层证据（故障现场记录用）。"""
+    exc = BrowserTransportError(message)
+    exc.net_evidence = list(getattr(page, "rpc_net_failures", None) or [])[-8:]
+    return exc
+
+
 async def _evaluate_transport(
     page: CDPPage,
     expression: str,
@@ -295,7 +302,7 @@ class XHRStreamTransport:
             # 页面里的网络层失败（Failed to fetch / network error / aborted）：
             # 不是上游 HTTP 错误，交给 API 层清模板后重试（未吐数据时）。
             _log_rpc_net_evidence(page, "replay")
-            raise BrowserTransportError(f"replay failed: {raw_text}")
+            raise _transport_error(page, f"replay failed: {raw_text}")
         return status, raw_text.encode("utf-8")
 
     async def send_streaming_request(
@@ -376,7 +383,9 @@ class XHRStreamTransport:
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
                     _log_rpc_net_evidence(page, "streaming")
-                    raise BrowserTransportError(f"streaming request failed: {message}")
+                    raise _transport_error(
+                        page, f"streaming request failed: {message}"
+                    )
                 elif etype in ("done", "aborted"):
                     while not queue.empty():
                         try:
@@ -392,8 +401,8 @@ class XHRStreamTransport:
             if not status_sent:
                 # 与时间无关：上游没有给出任何 status 就结束了（页面脚本异常等）
                 _log_rpc_net_evidence(page, "streaming-no-status")
-                raise BrowserTransportError(
-                    "streaming request ended before response status"
+                raise _transport_error(
+                    page, "streaming request ended before response status"
                 )
         finally:
             self._queues.pop(rid, None)

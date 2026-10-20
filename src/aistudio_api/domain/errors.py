@@ -6,7 +6,11 @@ import json
 
 
 class AistudioError(Exception):
-    pass
+    # 故障现场取证挂点（incidents.py 消费，不影响异常语义）：
+    # - net_evidence: transport 层附上的 CDP Network.loadingFailed 证据（502 断流归因）
+    # - raw_upstream_body: streaming 层附上的上游原始错误体（403/500 根因）
+    net_evidence: list[dict[str, object]] | None = None
+    raw_upstream_body: str = ""
 
 
 class AuthError(AistudioError):
@@ -36,7 +40,12 @@ class BrowserTransportError(RuntimeError):
 
     继承 RuntimeError 保持既有调用方与用例的捕获兼容；网关侧按浏览器故障处理
     （2026-10-20 零重试口径）：重启浏览器救后续请求，本次请求 502 而不是 500。
+
+    ``net_evidence`` 是取证挂点（同 AistudioError，incidents.py 消费）。
     """
+
+    net_evidence: list[dict[str, object]] | None = None
+    raw_upstream_body: str = ""
 
 
 GRPC_CODE_TO_HTTP: dict[int, int] = {

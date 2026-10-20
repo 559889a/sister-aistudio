@@ -282,7 +282,9 @@ class AIStudioClient:
                     raw_response=raw_text,
                 )
                 if status != 200:
-                    raise classify_error(status, raw_text)
+                    err = classify_error(status, raw_text)
+                    err.raw_upstream_body = raw_text[:8192]  # 故障现场留档
+                    raise err
                 output = parse_text_output(raw_text)
                 output.model = model
                 return self._restore_runtime_output(output, raw_text, captured)
@@ -364,7 +366,9 @@ class AIStudioClient:
                     raw_response=raw_text,
                 )
                 if status != 200:
-                    raise classify_error(status, raw_text)
+                    err = classify_error(status, raw_text)
+                    err.raw_upstream_body = raw_text[:8192]  # 故障现场留档
+                    raise err
                 output = parse_image_output(raw_text)
                 output.model = model
                 output = self._restore_runtime_output(output, raw_text, captured)

@@ -15,7 +15,7 @@ from aistudio_api.application.bypass import (
 )
 from aistudio_api.application.prefill import StreamDeduper
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import AistudioError, RequestError, classify_error
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.stream_parser import (
@@ -218,10 +218,14 @@ class StreamingGateway:
         if status_code != 200:
             detail = _summarize_error_body(raw_response)
             if status_code in (401, 403, 429):
-                raise classify_error(status_code, raw_response)
-            if detail:
-                raise RequestError(status_code, detail)
-            raise RequestError(status_code, "")
+                exc: AistudioError = classify_error(status_code, raw_response)
+            elif detail:
+                exc = RequestError(status_code, detail)
+            else:
+                exc = RequestError(status_code, "")
+            # 上游原始错误体留档（截断），给偶发 403/500 的现场记录用
+            exc.raw_upstream_body = raw_response[:8192]
+            raise exc
 
         tail = deduper.flush()
         if tail:
