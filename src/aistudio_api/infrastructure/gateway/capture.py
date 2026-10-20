@@ -24,9 +24,9 @@ from aistudio_api.config import DEFAULT_TEXT_MODEL
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.signatures import apply_signature_sentinels
-from aistudio_api.infrastructure.upstreams.common import channel_streaming_flag_enabled
 from aistudio_api.infrastructure.gateway.wire_codec import modify_body
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
+from aistudio_api.infrastructure.upstreams.common import channel_streaming_flag_enabled
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("capture")

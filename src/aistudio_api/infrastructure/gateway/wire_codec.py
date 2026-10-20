@@ -234,14 +234,14 @@ class AistudioWireCodec:
         # toolConfig 槽位（大概率被忽略/小概率 400）——这一注就是为了拿运行期
         # 证据：万一服务端 proto 比前端新，它就生效了。下标可用 env 调整。
         if request.tools:
-            from aistudio_api.infrastructure.upstreams.common import (
-                channel_streaming_flag_enabled,
-            )
-
             # 实测 field10(idx9) 是标量：塞消息形状直接 400「Unexpected list for
             # single non-message field」。注入默认关（防全线 400），只留 env 探针
             # 通道给后续实验（AISTUDIO_WIRE_TOOLCONFIG_PROBE=1 + 可调 IDX）。
             import os
+
+            from aistudio_api.infrastructure.upstreams.common import (
+                channel_streaming_flag_enabled,
+            )
 
             if channel_streaming_flag_enabled() and os.getenv(
                 "AISTUDIO_WIRE_TOOLCONFIG_PROBE", ""
