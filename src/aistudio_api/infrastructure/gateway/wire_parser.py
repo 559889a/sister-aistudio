@@ -400,6 +400,17 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         and isinstance(completion_tokens, int)
     ):
         total_tokens = prompt_tokens + completion_tokens
+    # 空壳 usageMetadata（列表在、计数全无）不是有效 usage：返回 {} 而不是
+    # 造一个全 None/0 的字典——那会在完成日志里打出假的「0 tok (in 0 / out 0)」
+    # （2026-10-20 pg/argon 实测触发）。
+    if (
+        prompt_tokens is None
+        and visible_completion_tokens is None
+        and total_tokens is None
+        and cached_tokens is None
+        and reasoning_tokens is None
+    ):
+        return {}
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,

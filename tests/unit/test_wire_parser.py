@@ -59,6 +59,9 @@ def test_iter_response_chunks():
 def test_parse_usage_metadata():
     assert parse_usage_metadata(None) == {}
     assert parse_usage_metadata("invalid") == {}
+    # 空壳（列表在、计数全无）不当有效 usage——否则完成日志打假 0 tok
+    assert parse_usage_metadata([]) == {}
+    assert parse_usage_metadata([None] * 10) == {}
 
     raw = [10, 20, 30, 5, {"prompt": "details"}, None, None, None, None, 15]
     parsed = parse_usage_metadata(raw)
