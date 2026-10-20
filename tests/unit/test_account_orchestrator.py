@@ -96,12 +96,8 @@ async def test_ensure_active_account_early_switch():
         runtime_state.rotator = mock_rotator
         runtime_state.account_service = mock_service
 
-        # attempt > 0 does nothing
-        await ensure_active_account(attempt=1, model="gemini-2.5-flash")
-
-        # attempt == 0 with unavailable model calls try_switch_account
-        mock_rotator.is_account_available.assert_not_called()
-        await ensure_active_account(attempt=0, model="gemini-2.5-flash")
+        # 当前账号对该模型不可用 → 请求前置调度提前切号（这不是失败重试）
+        await ensure_active_account(model="gemini-2.5-flash")
         mock_rotator.is_account_available.assert_called_with(
             "acc_1", model="gemini-2.5-flash"
         )
@@ -439,7 +435,7 @@ async def test_newly_imported_account_manual_activation_stays_sticky_on_first_re
         runtime_state.account_service = service
         runtime_state.client = mock_client
 
-        await ensure_active_account(attempt=0, model="models/gemini-3.8-flash")
+        await ensure_active_account(model="models/gemini-3.8-flash")
 
         # Active account must remain new_acc and never fail over to old_acc
         active = service.get_active_account()

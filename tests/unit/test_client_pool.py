@@ -1,8 +1,9 @@
-"""浏览器 worker 池单测：账号分配 / least-inflight / cooling / 失败自愈 / 单 client 回归。
+"""浏览器 worker 池单测：账号分配 / least-inflight / cooling / 故障重启 / 单 client 回归。
 
-用假 worker + 假 client，不启动任何浏览器。重点覆盖用户 2026-10-19 的明确要求：
-- 403/401、500、502、页面传输失败 → 后台重启当前 worker + 立刻切另一台重试；
-- 这些失败**不给账号加冷却**（auth_cooldown 不置位）；429 才保留配额冷却。
+用假 worker + 假 client，不启动任何浏览器。口径（2026-10-20 收紧为**零自动重试**）：
+- 403/401、500、502、页面传输失败 → 后台重启当前 worker，**本次请求不重试**、
+  按真实错误抛出；这些失败**不给账号加冷却**（auth_cooldown 不置位）；
+- 429 只保留账号/模型配额冷却，不重启 worker。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -237,18 +238,16 @@ async def _attempt(
     pool: ClientPool,
     exc: Exception,
     *,
-    attempt: int = 0,
-    has_yielded_data: bool = False,
     model_path: str = "models/gemini-3.8-flash",
-) -> bool:
-    return await handle_attempt_exception(
-        exc,
-        attempt=attempt,
-        model_path=model_path,
-        normalized_model=model_path,
-        client=pool,
-        has_yielded_data=has_yielded_data,
-    )
+) -> HTTPException:
+    with pytest.raises(HTTPException) as excinfo:
+        await handle_attempt_exception(
+            exc,
+            model_path=model_path,
+            normalized_model=model_path,
+            client=pool,
+        )
+    return excinfo.value
 
 
 # ────────────────────────────── 配置 ──────────────────────────────
@@ -403,7 +402,7 @@ async def test_stream_generate_content_passes_through(fake_store, monkeypatch):
     assert workers[0].inflight == 0
 
 
-# ────────────────────────────── 失败自愈钩子 ──────────────────────────────
+# ────────────────────────────── 故障重启钩子 ──────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -412,51 +411,31 @@ async def test_stream_generate_content_passes_through(fake_store, monkeypatch):
     [
         ("on_transport_error", "transport"),
         ("on_auth_error", "auth"),
-        ("on_rate_limited", "rate_limit"),
     ],
 )
-async def test_hooks_restart_failed_worker_and_report_standby(
+async def test_hooks_restart_failed_worker(
     fake_store, monkeypatch, fake_rotator, hook, reason
 ):
     workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
     pool = _pool(fake_store, workers, monkeypatch)
     pool._bind(workers[0])
 
-    can_retry = await getattr(pool, hook)(model="m")
+    await getattr(pool, hook)(model="m")
 
-    assert can_retry is True
     await pool.wait_restarts()
     assert workers[0].restart_calls == [reason]
     assert workers[0].state == WorkerState.READY
 
 
 @pytest.mark.asyncio
-async def test_standby_includes_idle_reclaimed_worker(
-    fake_store, monkeypatch, fake_rotator
-):
-    """空闲回收（STOPPED）的另一台也算备用：pick() 会把它拉起，不能误报「切备用=否」。"""
-    workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
-    workers[1].state = WorkerState.STOPPED
-    pool = _pool(fake_store, workers, monkeypatch)
-    pool._bind(workers[0])
-
-    can_retry = await pool.on_transport_error(model="m")
-
-    assert can_retry is True
-    await pool.wait_restarts()
-    assert workers[0].restart_calls == ["transport"]
-
-
-@pytest.mark.asyncio
-async def test_server_error_hook_reports_no_standby(fake_store, monkeypatch, fake_rotator):
+async def test_server_error_hook_restarts_worker(fake_store, monkeypatch, fake_rotator):
     workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
     workers[1].cooling_until = pool_module.time.time() + 60
     pool = _pool(fake_store, workers, monkeypatch)
     pool._bind(workers[0])
 
-    can_retry = await pool.on_server_error(model="m", status=502)
+    await pool.on_server_error(model="m", status=502)
 
-    assert can_retry is False
     await pool.wait_restarts()
     assert workers[0].restart_calls == ["http_502"]
 
@@ -466,25 +445,25 @@ async def test_server_error_hook_reports_no_standby(fake_store, monkeypatch, fak
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("exc", "expected_reason"),
+    ("exc", "expected_reason", "expected_status"),
     [
-        (AuthError("禁止访问: forbidden"), "auth"),
-        (RequestError(500, "boom"), "http_500"),
-        (RequestError(502, "bad gateway"), "http_502"),
-        (BrowserTransportError("streaming request failed: Failed to fetch"), "transport"),
+        (AuthError("禁止访问: forbidden"), "auth", 403),
+        (RequestError(500, "boom"), "http_500", 500),
+        (RequestError(502, "bad gateway"), "http_502", 502),
+        (BrowserTransportError("streaming request failed: Failed to fetch"), "transport", 502),
     ],
 )
-async def test_pool_worker_failures_restart_and_switch_without_account_cooldown(
-    fake_store, fake_rotator, monkeypatch, exc, expected_reason
+async def test_pool_worker_failures_restart_without_retry_or_account_cooldown(
+    fake_store, fake_rotator, monkeypatch, exc, expected_reason, expected_status
 ):
     workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
     pool = _pool(fake_store, workers, monkeypatch)
     await _fail_on(pool, 0, exc)
 
-    retried = await _attempt(pool, exc)
+    http_exc = await _attempt(pool, exc)
 
-    # 立刻切另一台重试，不等重启完成；failed worker 后台重启
-    assert retried is True
+    # 本次请求不重试：按真实状态码抛出；failed worker 后台重启
+    assert http_exc.status_code == expected_status
     await pool.wait_restarts()
     assert workers[0].restart_calls == [expected_reason]
     # 用户拍板：403/401/5xx/502/传输失败都不给账号加冷却
@@ -511,7 +490,7 @@ async def test_pool_transport_error_uses_current_worker_account(
 
 
 @pytest.mark.asyncio
-async def test_pool_no_standby_returns_original_status_code(
+async def test_pool_server_error_preserves_original_status_code(
     fake_store, fake_rotator, monkeypatch
 ):
     workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
@@ -520,17 +499,16 @@ async def test_pool_no_standby_returns_original_status_code(
     exc = RequestError(500, "boom")
     await _fail_on(pool, 0, exc)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await _attempt(pool, exc)
+    http_exc = await _attempt(pool, exc)
 
     # 原始状态码保留（不能变成 500 以外的新错误类型）
-    assert exc_info.value.status_code == 500
+    assert http_exc.status_code == 500
     await pool.wait_restarts()
     assert workers[0].restart_calls == ["http_500"]
 
 
 @pytest.mark.asyncio
-async def test_pool_rate_limit_keeps_quota_cooldown(
+async def test_pool_rate_limit_keeps_quota_cooldown_without_restart(
     fake_store, fake_rotator, monkeypatch
 ):
     workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
@@ -538,13 +516,13 @@ async def test_pool_rate_limit_keeps_quota_cooldown(
     exc = UsageLimitExceeded("quota")
     await _fail_on(pool, 0, exc)
 
-    retried = await _attempt(pool, exc)
+    http_exc = await _attempt(pool, exc)
 
-    assert retried is True
-    # 429 保留账号/模型配额冷却，并且 worker 也后台重启
+    assert http_exc.status_code == 429
+    # 429 保留账号/模型配额冷却，但不重启 worker（重启只服务于已废除的重试路径）
     assert fake_rotator.rate_limited_calls
-    await pool.wait_restarts()
-    assert workers[0].restart_calls == ["rate_limit"]
+    assert workers[0].restart_calls == []
+    assert workers[0].state == WorkerState.READY
 
 
 @pytest.mark.asyncio
@@ -556,39 +534,26 @@ async def test_pool_session_expired_isolates_account_and_restarts(
     exc = SessionExpiredError("redirected to login")
     await _fail_on(pool, 0, exc)
 
-    retried = await _attempt(pool, exc)
+    http_exc = await _attempt(pool, exc)
 
-    assert retried is True
+    assert http_exc.status_code == 401
     # 登录态失效仍按账号隔离（24h），403 不走到这里
     assert fake_rotator.session_expired_calls == ["acc_0"]
     await pool.wait_restarts()
     assert workers[0].restart_calls == ["auth"]
 
 
-@pytest.mark.asyncio
-async def test_pool_does_not_retry_after_bytes_yielded(fake_store, fake_rotator, monkeypatch):
-    workers = [FakeWorker(0, account_id="acc_0"), FakeWorker(1, account_id="acc_1")]
-    pool = _pool(fake_store, workers, monkeypatch)
-    exc = BrowserTransportError("streaming request failed: Failed to fetch")
-    await _fail_on(pool, 0, exc)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _attempt(pool, exc, has_yielded_data=True)
-
-    assert exc_info.value.status_code == 502
-    await pool.wait_restarts()
-
-
 # ────────────────────────────── 单 client 路径回归 ──────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_single_client_auth_error_keeps_legacy_behaviour(
+async def test_single_client_auth_error_restarts_browser_without_account_cooldown(
     fake_rotator, monkeypatch
 ):
-    """pool_size=1 的旧路径：403 仍记录 auth_error（账号冷却），不当 worker 故障。"""
+    """pool_size=1 的路径：403 同样按浏览器故障处理——重启浏览器、不加账号冷却、403 返回。"""
     client = MagicMock()
-    client._session = None
+    client._session = MagicMock()
+    client._session._close_internal = AsyncMock()
     client.clear_templates = MagicMock()
     # 明确模拟「单 client」：没有 is_pool 标记
     del client.is_pool
@@ -596,16 +561,18 @@ async def test_single_client_auth_error_keeps_legacy_behaviour(
     with pytest.raises(HTTPException) as exc_info:
         await handle_attempt_exception(
             AuthError("forbidden"),
-            attempt=0,
             model_path="models/gemini-3.8-flash",
             normalized_model="models/gemini-3.8-flash",
             client=client,
-            has_yielded_data=False,
         )
 
     assert exc_info.value.status_code == 403
-    assert fake_rotator.auth_error_calls == ["acc_global"]
-    assert fake_rotator.auth_cooldown == {"acc_global": 300.0}
+    # 不给账号加冷却（403 是浏览器/BotGuard 问题，不是账号问题）
+    assert fake_rotator.auth_error_calls == []
+    assert fake_rotator.auth_cooldown == {}
+    assert fake_rotator.error_calls == [("acc_global", "models/gemini-3.8-flash")]
+    # 单浏览器路径的重启 = 杀浏览器进程（下次请求 ensure_ready 重建）
+    client._session._close_internal.assert_awaited_once()
 
 
 # ────────────────────────────── worker 生命周期 / 空闲回收 / 换号 ──────────────────────────────

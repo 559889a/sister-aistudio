@@ -9,7 +9,6 @@ from aistudio_api.api.state import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
-MAX_RETRIES = 5
 
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -155,14 +154,12 @@ async def try_switch_account(
         )
 
 
-async def ensure_active_account(attempt: int, model: str | None = None) -> None:
-    """确保在初次尝试时存在活跃账号，且该账号对目标模型可用。
+async def ensure_active_account(model: str | None = None) -> None:
+    """确保存在活跃账号且对目标模型可用（**请求前置调度**，不是失败重试）。
 
     pool 模式（ClientPool）由池子自己按 least-inflight + 账号可用性选 worker，
     这里不再动「全局活跃账号」——否则会和 worker 各自绑定的账号打架。
     """
-    if attempt != 0:
-        return
     client = runtime_state.client
     if getattr(client, "is_pool", False) is True:
         return
@@ -211,7 +208,6 @@ def record_rotator_event(
 
 
 __all__ = [
-    "MAX_RETRIES",
     "ensure_active_account",
     "record_rotator_event",
     "try_switch_account",

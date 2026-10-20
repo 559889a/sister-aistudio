@@ -1,13 +1,13 @@
 """「一次客户端请求 = 一次上游生成」的回归用例。
 
 背景：老项目在 bypass 模式下出现过「一个输出要调用 n 次模型」的体感问题。
-新项目的口径是：bypass 单轮、不续写；只有**失败**（403/429/204/偶发 404/浏览器挂起/
-登录失效）才会重试，而且流式一旦吐出任何正文就不再重试。这里把这条口径钉死：
+口径（2026-10-20 收紧为**零自动重试**）：bypass 单轮、不续写、失败也不重打，
+失败按真实错误返回，由客户端决定重发。这里把这条口径钉死：
 
 1. 非流式 bypass 成功路径：上游只被调用 1 次，正文从合成工具参数里还原；
-2. bypassMode=required 但模型没调工具：也只调用 1 次，随后直接 502（不重试）；
-3. 上游返回 RequestError 时，API 层立即转成 HTTPException，不进重试循环；
-4. 流式已经吐出数据后遇到错误，也不再重试（切换账号只会浪费配额）；
+2. bypassMode=required 但模型没调工具：也只调用 1 次，随后直接 502；
+3. 上游返回 RequestError 时，API 层立即转成 HTTPException；
+4. 流式失败（哪怕还没吐任何正文）也只打一次上游，错误渲染成流内错误帧；
 5. 流式成功路径只消费一次上游流（没有「补一轮」的下游逻辑）。
 """
 
@@ -142,11 +142,10 @@ async def test_bypass_required_miss_calls_upstream_once_then_502(
 
 @pytest.mark.asyncio
 async def test_request_error_is_not_retried_by_api_layer():
-    """RequestError（含 bypass required 未命中）走的是立即报错分支，不进重试循环。"""
+    """RequestError（含 bypass required 未命中）走的是立即报错分支，不重试。"""
     with pytest.raises(HTTPException) as excinfo:
         await svc.handle_attempt_exception(
             RequestError(502, "bypass miss"),
-            attempt=0,
             model_path="models/gemini-3.8-flash",
             normalized_model="models/gemini-3.8-flash",
             client=MagicMock(),
@@ -155,16 +154,16 @@ async def test_request_error_is_not_retried_by_api_layer():
 
 
 @pytest.mark.asyncio
-async def test_stream_does_not_retry_after_data_was_yielded():
-    """流式已经吐出正文后再遇到 403：直接报错，不换号、不重打上游。"""
+async def test_stream_auth_error_returns_403_immediately():
+    """流式遇到 403：直接报错，不换号、不重打上游（零自动重试）。"""
+    client = MagicMock()
+    client._session = None
     with pytest.raises(HTTPException) as excinfo:
         await svc.handle_attempt_exception(
             AuthError("403 The caller does not have permission"),
-            attempt=0,
             model_path="models/gemini-3.8-flash",
             normalized_model="models/gemini-3.8-flash",
-            client=MagicMock(),
-            has_yielded_data=True,
+            client=client,
         )
     assert excinfo.value.status_code == 403
 

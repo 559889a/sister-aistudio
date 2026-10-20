@@ -1,12 +1,12 @@
-"""固定 N 台 Chromium 的 worker 池（负载均衡 + 失败自愈）。
+"""固定 N 台 Chromium 的 worker 池（负载均衡 + 故障重启）。
 
-用户要求（2026-10-19）：
+用户要求（2026-10-19 起，2026-10-20 收紧为**零自动重试**）：
 - 固定 2 台浏览器、每台独立 CDP 端口（9222/9223）和独立 profile 目录，
   **两台都接请求**（不是纯热备），按 least-inflight 分发；
 - 403/401 / 5xx / 502 / 页面 fetch-XHR 传输失败时，**当前 worker 后台
-  kill + 重启 Chromium**，这次请求在还没给客户端吐字节时**立刻切到另一台**
-  重试（不等重启完成）；这些失败**不给账号加冷却**——它们不是上游的配额问题；
-- 429 才保留账号/模型的配额冷却；
+  kill + 重启 Chromium**——仅此而已，本次请求**不重试**，按真实错误返回；
+  这些失败**不给账号加冷却**——它们不是上游的配额问题；
+- 429 只保留账号/模型的配额冷却，不重启 worker；
 - 登录态失效（真的被重定向到登录页，SessionExpiredError）仍按账号隔离。
 
 单浏览器路径（``AISTUDIO_BROWSER_POOL_SIZE=1``）完全走旧的 ``AIStudioClient``，
@@ -403,71 +403,38 @@ class ClientPool:
         finally:
             worker.inflight = max(0, worker.inflight - 1)
 
-    # ---------- 失败自愈钩子（由 handle_attempt_exception 调用） ----------
-    async def on_transport_error(self, model: str | None = None) -> bool:
-        """页面 fetch/XHR 传输失败：重启该 worker，返回「另一台现在能接」。"""
-        return await self._worker_failure("transport", model)
+    # ---------- 故障重启钩子（由 handle_attempt_exception 调用） ----------
+    async def on_transport_error(self, model: str | None = None) -> None:
+        """页面 fetch/XHR 传输失败：后台重启该 worker（本次请求不重试）。"""
+        await self._worker_failure("transport", model)
 
-    async def on_auth_error(self, model: str | None = None) -> bool:
-        """401/403 权限/登录失败：重启该 worker，**不给账号加冷却**。"""
-        return await self._worker_failure("auth", model)
-
-    async def on_rate_limited(self, model: str | None = None) -> bool:
-        """429 配额限额：账号冷却由调用方记账；worker 也后台重启一份干净页面。"""
-        return await self._worker_failure("rate_limit", model)
+    async def on_auth_error(self, model: str | None = None) -> None:
+        """401/403 权限/登录失败：后台重启该 worker，**不给账号加冷却**。"""
+        await self._worker_failure("auth", model)
 
     async def on_server_error(
         self, model: str | None = None, status: int = 500
-    ) -> bool:
-        """上游 5xx：按 worker 故障处理（重启 + 切另一台）。"""
-        return await self._worker_failure(f"http_{status}", model)
+    ) -> None:
+        """上游 5xx：按浏览器故障处理（后台重启，本次请求按原状态码返回）。"""
+        await self._worker_failure(f"http_{status}", model)
 
-    async def _worker_failure(self, reason: str, model: str | None) -> bool:
+    async def _worker_failure(self, reason: str, model: str | None) -> None:
         # 让后台重启任务先拿到调度机会（这些钩子只是「标记 + 派活」，不阻塞请求）
         await asyncio.sleep(0)
         worker = get_current_worker() or self._primary()
         if worker is None:
-            return False
+            return
         worker.failures += 1
         worker.cooling_until = time.time() + WORKER_COOLDOWN_S
         if worker.state == WorkerState.READY:
             worker.state = WorkerState.COOLING
         self._spawn_restart(worker, reason)
-        standby = self._standby_worker(exclude=worker)
-        standby_text = "否"
-        if standby is not None:
-            standby_text = f"#{standby.index}"
-            if standby.state == WorkerState.STOPPED:
-                standby_text += "（空闲休眠，将拉起）"
         logger.warning(
-            "pool: worker #%d 故障 (%s, model=%s)，后台重启；切备用=%s",
+            "pool: worker #%d 故障 (%s, model=%s)，后台重启；本次请求按真实错误返回，不重试",
             worker.index,
             reason,
             model or "-",
-            standby_text,
         )
-        return standby is not None
-
-    def _has_standby(self, *, exclude: Any) -> bool:
-        return self._standby_worker(exclude=exclude) is not None
-
-    def _standby_worker(self, *, exclude: Any) -> Any | None:
-        """找一台这次请求能接住的备用 worker。
-
-        **空闲回收（STOPPED）也算备用**：它只是进程被回收了内存，`pick()` 会在下次
-        请求时把它重新拉起。只认 READY 会把「另一台正好空闲休眠」误判成「无备用」——
-        2026-10-20 现场：8 分钟的长请求失败时另一台在 30 分钟空闲后已被回收，
-        日志写「切备用=否」，请求直接 502，其实它本可以拉起再战。
-        """
-        now = time.time()
-        for worker in self._workers:
-            if worker is exclude:
-                continue
-            if worker.cooling_until > now:
-                continue
-            if worker.state in (WorkerState.READY, WorkerState.STOPPED):
-                return worker
-        return None
 
     def _primary(self) -> Any | None:
         for worker in self._workers:

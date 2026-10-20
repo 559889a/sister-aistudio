@@ -29,8 +29,8 @@
 - **流式不做生成看门狗，只发心跳**（用户明确要求）：不存在「单次生成最长等待 / 流式空闲超时」这类会掐断长回答的计时器——`streaming_init.js`、`hooked_request.js`、`transport.py` 里都不许加回来。需要保活就在 SSE 层发心跳（`application/stream_heartbeat.py`，1 秒间隔；OpenAI 发空 delta chunk、Gemini 原生发 `: ping` 注释行），它只写字节、不改变上游等待逻辑。基础设施类超时（浏览器启动/Cdp 连接/BotGuard 签名）保留。
 - **流式 JSON 修复只救截断、不改内容**：`IncrementalJSONStreamParser` 的 `feed()` 对解析失败的完整分块先补全再解析，`finish()` 抢救流末尾被截断的最后一块（走与 `feed()` 同一个 `_consume()`）；补全只做「闭合字符串/数组/对象、处理末尾反斜杠」，不得改写已有正文。`wire_parser.parse_response_part` 里「2 元素且 index1 是角色名」的守卫只拦 `[parts, role]` 形状，别扩大成按角色名一律丢弃（正文恰好是 model/user/system/assistant 时会真丢字）。
 - **页面 fetch/XHR 的网络失败是 `BrowserTransportError`，不是 500**：`transport.py` 把 `Failed to fetch`、页面关闭、CDP 命令超时统一抛这个类型；`handle_attempt_exception` 在**还没吐任何正文**时清模板缓存原地重试（页面不可用则重建会话），已吐数据或重试耗尽报 502 `UNAVAILABLE`。别退回「未知严重异常 → 500」，也**不要**因为传输失败去切换账号——账号本身没坏。
-- **浏览器 worker 池：worker 隔离、单请求绑定、失败切另一台（别退回单浏览器语义）**：`AISTUDIO_BROWSER_POOL_SIZE>1` 时由 `infrastructure/gateway/client_pool.py` 管 N 台 Chromium——第 N 台 CDP 端口 = `browser_port+N`、profile 目录按 `-wN` 后缀隔离（同一 auth_file 也不许共用目录）；一个请求由 `pick()` 绑定到一台 worker（ContextVar `current_worker/current_account_id`），**中途不换 worker**。403/401、5xx、502、页面传输失败都按 **worker 故障**处理：后台 kill+重启那台，未吐字节时本次请求立刻切另一台重试；这些错误**不给账号加冷却**（只有 429 保留配额冷却、SessionExpiredError 才按账号隔离）。单浏览器路径（`pool_size=1`）保持旧行为，两种模式别混用判据。
-- **失败切换的「备用」包含空闲休眠（STOPPED）worker**：`_standby_worker()` 认 `READY` + `STOPPED`（`pick()` 会把它重新拉起，20~40s），日志写 `切备用=#N（空闲休眠，将拉起）`。**别改回只认 READY**：2026-10-20 现场就是另一台空闲 30 分钟被回收，8 分钟长请求失败时日志写「切备用=否」、请求直接 502 —— 其实那台可以拉起来再战。
+- **网关层零自动重试（用户 2026-10-20 拍板，别加回来）**：网关对**当次请求**不做任何自动重试——不切备用 worker、不清模板原地重打、不切账号重试（204、偶发 Ambiguous 404 抖动也不重试）；失败按真实错误返回，由客户端决定重发。`handle_attempt_exception` 返回 `NoReturn`：归类 + 记账 + 唯一自愈动作（特定故障后台重启浏览器）+ 抛错。调度层动作不是重试、保留：`ensure_active_account` 请求前置挑号、429 配额冷却、SessionExpired 账号隔离 24h。
+- **浏览器 worker 池：worker 隔离、单请求绑定、故障只重启不重试**：`AISTUDIO_BROWSER_POOL_SIZE>1` 时由 `infrastructure/gateway/client_pool.py` 管 N 台 Chromium——第 N 台 CDP 端口 = `browser_port+N`、profile 目录按 `-wN` 后缀隔离（同一 auth_file 也不许共用目录）；一个请求由 `pick()` 绑定到一台 worker（ContextVar `current_worker/current_account_id`），**中途不换 worker**。403/401、5xx、502、页面传输失败都按 **worker 故障**处理：后台 kill+重启那台，本次请求按真实错误返回；这些错误**不给账号加冷却**（只有 429 保留配额冷却、SessionExpiredError 才按账号隔离）。429 不重启 worker。单浏览器路径（`pool_size=1`）同语义：重启 = 杀进程，下次请求 `ensure_ready` 重建。
 - **bypass 请求的上游是「整段返回」，不是网关丢事件**：bypass 会注入合成 functionCall，Gemini 不分片下发函数参数，**上游第一帧就是整段工具调用**，在此之前连 HTTP 响应头都不到（2026-10-20 真机复测：bypass 开 首包 5.4s/总 5.5s、正文 1 块；bypass 关 首包 3.1s/总 7.8s、19 块逐块到达）。**周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20，几百秒的请求只会刷屏）——不要加回来**；判据是完成日志的「首包 X s / 总 Y s」，失败归因靠 CDP 网络层证据 WARN。**也不要因此加看门狗、提前 502、或伪造分块**。
 - Flake：页面 `fetch` 在长等待后抛 `Failed to fetch` 是真实的网络/上游断开（`BrowserTransportError`），不是本项目的 abort（`abort_stream` 目前没有任何调用点）；按 worker 故障重启 + 有备用就切，没备用才 502。主项目（`C:\build2api`）同通道记录里也有一次 183s 的 `Failed to fetch`。
 - **架构事实优先（Fact & Architecture over Brittle Tests）**：保持架构整洁与低耦合。避免为了迁就耦合了私有变量的脆弱 mock 测试而妥协生产设计；遇冲突时应重构测试以对齐公共接口契约，消除抽象泄露。
@@ -193,9 +193,7 @@ uv run python3 main.py server --port 8080
 > 1. **原子化文件持久化**：所有持久化文件（`registry.json`、`auth.json`、`meta.json` 等）操作必须使用 `account_store._atomic_write_json`（写入临时文件后通过 `os.replace` 原子替换），防止并发写入截断。
 2. **蓝绿会话平滑热切与就绪门机制**：切换账号时，`BrowserSession` 在后台创建独立新标签页，注入 Cookie、完成页面导航与 BotGuard 握手验证；验证通过后原子翻转 `SessionReadinessGate` 并将新上下文设为就绪。旧会话上下文加入退休队列，优雅等待在途流式请求排干（`decr_in_flight()` 触发 `drain_event`）后再行关闭，保障流式请求平滑过渡零中断。
 3. **缓存与模板隔离**：账号切换、429 限流或 403 鉴权重试时，调用 `client.clear_templates()`，避免跨账号复用请求模板。快照签名按每次请求哈希实时生成，绝不跨请求共享。初次握手截获基线模板后，任意目标模型通过 `capture_template(model)` 纯内存动态适配参数。
-4. **鉴权/服务端/传输故障按模式分策略（别再退回去）**：
-   - **单浏览器路径（`AISTUDIO_BROWSER_POOL_SIZE=1`，旧行为）**：403 把当前账号置入 `auth_cooldown` 并故障转移到健康账号；传输失败在未吐正文时重试，否则 502。
-   - **worker 池路径（`>1`，默认）**：403/401、5xx、502、页面 fetch/XHR 传输失败**都不是账号问题**——按 worker 故障处理：后台 kill+重启那台 Chromium，未吐字节时本次请求立刻切另一台重试；**不写 `auth_cooldown`**（不要调 `record_auth_error`）。只有 429 保留账号/模型的配额冷却；只有 `SessionExpiredError`（真的被跳到登录页）按账号隔离。
+4. **鉴权/服务端/传输故障：一律「记账 + 重启浏览器 + 真实错误返回」（零重试，别再退回去）**：403/401、5xx、502、页面 fetch/XHR 传输失败**都不是账号问题**——不写 `auth_cooldown`（不要调 `record_auth_error`），按浏览器故障处理：pool 后台 kill+重启那台 worker，单浏览器杀进程待下次请求重建；本次请求按真实状态码返回（传输失败 502）。只有 429 保留账号/模型的配额冷却（只记账，不重启 worker）；只有 `SessionExpiredError`（真的被跳到登录页）按账号隔离 24h。
 5. **无全局 DOM 污染**：页面内 JavaScript 交互使用局部闭包 `Promise` 返回数据，不在 `window` 对象上遗留全局共享状态。
 6. **Cookie 智能精简与天然协商**：外部导入 Cookie 时自动过滤旧设备或跨 IP 绑定的易腐败凭据（`OSID`、`__Secure-OSID`、`SIDCC` 及 `_ga` 等追踪标记），保留核心认证项（`SID`、`SAPISID`、`1PSIDTS`）。浏览器访问 AI Studio 时自动协商出绑定当前网络/TLS 的全新有效 `OSID`，杜绝 403 权限拒绝。
 7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制以保障 Android 低 RAM 运行；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
@@ -288,6 +286,7 @@ aistudio-api/
 | **（第三轮）重试耗尽不再静默空流/谎报 429**：`stream_raw_events` 抛出最后的错误渲染错误帧；非流式兜底按真实错误分类 | `application/api_service_gemini.py` | 全量 567/7 |
 | **（第三轮）debug+精简**：删死代码 `get_next_account_with_stats`（50 行）、`AIStudioClient.replay/_captured`；status_map 提常量、page_send 收尾去重、clamp_pool_size 复用 | `account_rotator.py`、`client.py`、`botguard_bootstrap.py`、`app.py` 等 | 全量 567/7，净 -50 行 |
 | **（第三轮）独立逆向复核后修复 digest**：`generate_snapshot` 剔除 executableCode/codeExecutionResult（页面 `_.Tm` 只算 text/inline/fileId，多算是 403[7] 诱因）；`wire_spec` 语义标注修正（14=responseModalities 等） | `infrastructure/gateway/session.py`、`wire_spec.py` | 新增 `test_generate_snapshot_digest_ignores_code_parts`；完整报告在 `逆向相关内容/re-verification-2026-10-20.md`（本地，不入库） |
+| **（第四轮，2026-10-20）网关零自动重试**：用户拍板移除全部当次请求重试（切备用 worker / 单浏览器原地重试 / 切号重试 / 204 与 Ambiguous 404 抖动重试、`MAX_RETRIES`、备用判定 `_standby_worker`）；自愈仅剩「特定故障后台重启浏览器」（403/401、5xx、传输失败、会话挂死、登录页重定向），429 只记账不重启 | `application/api_service_gemini.py`、`infrastructure/gateway/client_pool.py`、`application/account_orchestrator.py` + 5 个测试文件 | 全量 **563 passed / 7 failed**（7 条全是 §6.3.7 环境类既有失败）；ruff 0 errors；pyright 86 = 基线持平 0 新增 |
 | 文档：binding 新构建、bypass 整段返回、池 standby 语义 | `README.md`、`AGENT.md`、`docs/BOTGUARD_VERIFICATION_CHAIN.md` | — |
 
 上一轮（同一会话）已完成、本轮继续有效：2 台 worker 池（9222/9223，`-w0`/`-w1`）、
@@ -324,8 +323,9 @@ OpenAI 兼容端口、bypass/预填充/签名哨兵。
    （`routes_openai.py` / `api_service_gemini.py`，理由：单请求可能连跑几百秒，WARN 只会刷屏）。
    bypass 期间**原理上无法**区分「正在生成」与「无响应」：上游完成前 0 字节（连响应头都不来，
    已实测），网关侧任何「进度」信号都只能是自造的非标准事件。
-3. **超长请求失败后的重试窗口**：备用 worker 空闲休眠时需要 20~40s 拉起，再重新生成可能又是几分钟；
-   是否对「已经等了 N 分钟且无首帧」的 transport 失败改为快速失败（而不是切备用重试），待用户决定。
+3. ~~超长请求失败后的重试窗口~~ **已拍板（2026-10-20 第四轮）：网关不做任何自动重试**——
+   A（切备用重试）/ B（快速失败）都不选，自愈仅限「特定问题 → 后台重启无头浏览器」，
+   当次请求按真实错误返回，重发与否由客户端决定。相关代码已全部移除（见 §6.1 第四轮）。
 4. ~~单账号时两台 worker 共用 cookie~~ **已修（2026-10-20 第二轮）**：`save_browser_cookies` 与
    `verify_account_identity` 的 meta.json 写入原来**并不是**原子写（交接文档说错了）——直接
    `write_text` 会让另一台 worker / 传输层兜底读到半截 JSON 误判 Cookie 失效。现全部改走
@@ -403,9 +403,9 @@ node --check src\aistudio_api\infrastructure\browser\js\install_hooks.js
 - `上游 Ns 无任何数据（响应头都没收到）` = **不是 bug**：bypass 的 functionCall 上游整段返回，
   出第一帧前没有任何字节（也就没有响应头）；心跳一直在发。这条周期 WARN 已按用户要求移除
   （2026-10-20），别加回来；判据用完成日志的「首包 X s / 总 Y s」。
-- `Failed to fetch` → 502 = **不是误判**：页面 fetch 真的被上游/网络断开（主项目同通道也有），
-  但有备用却没切是 **真误判（已修：空闲休眠也算备用）**。现在失败时还会跟一条
-  `CDP 网络层证据 … err=net::ERR_xxx` 的 WARN，下次复现直接拿它归因。
+- `Failed to fetch` → 502 = **不是误判**：页面 fetch 真的被上游/网络断开（主项目同通道也有）。
+  2026-10-20 第四轮起网关**零自动重试**：传输失败只做「后台重启那台浏览器 + 本次请求 502」，
+  不再切备用重打。失败时会跟一条 `CDP 网络层证据 … err=net::ERR_xxx` 的 WARN，直接拿它归因。
 - WebUI 手动切号后「一半请求还在旧账号」= **真 bug（已修，2026-10-20 第二轮）**：池模式现在
   `activate_account` 重绑所有 worker；之前只切主 worker。
 - auth.json 偶发读成半截 JSON → 误判 Cookie 失效 = **真隐患（已修）**：cookie/meta 回写改成原子替换了。

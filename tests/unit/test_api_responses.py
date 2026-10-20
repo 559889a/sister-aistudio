@@ -128,7 +128,8 @@ def test_clean_upstream_error_message():
 
 
 @pytest.mark.asyncio
-async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
+async def test_handle_attempt_exception_404_raises_without_retry():
+    """404（含偶发的 Ambiguous RPC 抖动）一律按原状态码返回，网关不重试。"""
     from unittest.mock import MagicMock
 
     from fastapi import HTTPException
@@ -139,45 +140,28 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
     mock_client = MagicMock(spec=AIStudioClient)
     mock_client.clear_templates = MagicMock()
 
-    # 1. Ambiguous RPC 404 error should be retried in-place without raising
     ambiguous_err = RequestError(
         404,
         "Ambiguous request for service '' and method '/GenerativeService.StreamGenerateContent'. Please use fully qualified (unique) service and method names to call this method.",
     )
-    should_retry = await handle_attempt_exception(
-        ambiguous_err,
-        attempt=0,
-        model_path="gemini-3.7-flash",
-        normalized_model="models/gemini-3.7-flash",
-        client=mock_client,
-        has_yielded_data=False,
-    )
-    assert should_retry is True
-    mock_client.clear_templates.assert_called_once()
+    with pytest.raises(HTTPException) as exc_info:
+        await handle_attempt_exception(
+            ambiguous_err,
+            model_path="gemini-3.7-flash",
+            normalized_model="models/gemini-3.7-flash",
+            client=mock_client,
+        )
+    assert exc_info.value.status_code == 404
 
-    # 2. Other legitimate 404 errors (e.g. model not found) MUST NOT be retried
     other_404 = RequestError(404, "Model 'models/nonexistent' not found.")
     with pytest.raises(HTTPException) as exc_info:
         await handle_attempt_exception(
             other_404,
-            attempt=0,
             model_path="nonexistent",
             normalized_model="models/nonexistent",
             client=mock_client,
-            has_yielded_data=False,
         )
     assert exc_info.value.status_code == 404
-
-    # 3. If data has already been yielded to the client, retry MUST NOT happen
-    with pytest.raises(HTTPException):
-        await handle_attempt_exception(
-            ambiguous_err,
-            attempt=0,
-            model_path="gemini-3.7-flash",
-            normalized_model="models/gemini-3.7-flash",
-            client=mock_client,
-            has_yielded_data=True,
-        )
 
 @pytest.mark.asyncio
 async def test_build_gemini_streaming_response_passes_requested_model():
@@ -219,8 +203,8 @@ async def test_build_gemini_streaming_response_passes_requested_model():
 
 
 @pytest.mark.asyncio
-async def test_streaming_metadata_event_does_not_block_failover():
-    """验证在仅接收到 thought_signature 等内部元数据事件时发生异常，不会误判为已发送数据而阻断重试。"""
+async def test_streaming_metadata_then_error_emits_error_frame_without_retry():
+    """仅收到 thought_signature 等元数据后遇错：渲染错误帧，只打一次上游（零重试）。"""
     from unittest.mock import MagicMock
 
     from aistudio_api.api.schemas import (
@@ -239,13 +223,9 @@ async def test_streaming_metadata_event_does_not_block_failover():
     async def fake_stream_generate_content(*args, **kwargs):
         nonlocal attempt_count
         attempt_count += 1
-        if attempt_count == 1:
-            # 首次尝试：仅产生内部元数据事件，尚未发出实际正文 chunk，随即遇到 204/抖动异常
-            yield ("thought_signature", "sig_early")
-            raise RequestError(204, "No content")
-        # 第二次尝试：正常流式输出
-        yield ("body", "Hello world after retry")
-        yield ("finish_reason", "STOP")
+        # 仅产生内部元数据事件，尚未发出实际正文 chunk，随即遇到 204/抖动异常
+        yield ("thought_signature", "sig_early")
+        raise RequestError(204, "No content")
 
     mock_client = MagicMock(spec=AIStudioClient)
     mock_client.stream_generate_content = MagicMock(side_effect=fake_stream_generate_content)
@@ -261,6 +241,7 @@ async def test_streaming_metadata_event_does_not_block_failover():
     )
 
     chunks = [chunk async for chunk in resp.body_iterator]
-    # 验证重试成功完成
-    assert attempt_count == 2
-    assert any("Hello world after retry" in str(c) for c in chunks)
+    # 只打一次上游；失败渲染成流内错误帧，不补一轮
+    assert attempt_count == 1
+    assert any("error" in str(c) for c in chunks)
+    assert not any("Hello world" in str(c) for c in chunks)

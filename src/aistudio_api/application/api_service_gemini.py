@@ -7,6 +7,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from typing import NoReturn
 
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -21,10 +22,8 @@ from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
-    MAX_RETRIES,
     ensure_active_account,
     record_rotator_event,
-    try_switch_account,
 )
 from aistudio_api.application.chat_service import (
     NormalizedGeminiRequest,
@@ -43,7 +42,6 @@ from aistudio_api.domain.errors import (
     SessionExpiredError,
     UsageLimitExceeded,
     is_browser_session_hang_error,
-    is_transient_rpc_error,
     parse_upstream_grpc_error,
 )
 from aistudio_api.domain.models import ModelOutput
@@ -53,10 +51,10 @@ from aistudio_api.infrastructure.utils.request_context import get_request_id
 
 logger = get_logger("api.gemini")
 
-# 浏览器传输失败（Failed to fetch 这类）只在这段时间内视为「瞬时抖动」可以去重试。
-# 超过它才失败的请求通常已经在上游排队/生成很久，重试只会让客户端再多等一个同样长
-# 的窗口（实测三次重试把一次请求拖到 800+ 秒），所以直接 502 让客户端看到失败。
-_BROWSER_TRANSPORT_RETRY_MAX_S = 20.0
+# 用户拍板（2026-10-20）：网关层**不做任何自动重试**——不切备用 worker、不清模板
+# 原地重打、不切账号重试。本次请求按真实错误返回，由客户端自己决定要不要重发。
+# 唯一的自愈动作：特定故障（403/401、5xx、页面传输失败、会话挂死、登录页重定向）
+# 时后台重启出问题的那台无头浏览器，让**后续**请求拿到干净页面。别把任何重试加回来。
 
 # 周期性「上游 Ns 无任何数据」WARN 已按用户要求移除（2026-10-20）：bypass 请求
 # 动辄几百秒整段返回，这条 WARN 只会刷屏。静默期只有 1s 心跳；完成后日志里的
@@ -198,21 +196,21 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
 async def handle_attempt_exception(
     exc: Exception,
     *,
-    attempt: int,
     model_path: str,
     normalized_model: str | None,
     client: AIStudioClient,
-    has_yielded_data: bool = False,
     attempt_elapsed_s: float | None = None,
-) -> bool:
-    """Handle per-attempt error classification and account switching.
+) -> NoReturn:
+    """错误归类 + 唯一自愈动作（后台重启无头浏览器）+ 抛出真实错误（绝不重试）。
 
-    Returns True if the operation should be retried, or raises HTTPException / re-raises.
+    用户拍板（2026-10-20）：网关层不做任何自动重试——不切备用 worker、不清模板
+    原地重打、不切账号重试，本次请求按真实错误返回，由客户端自己决定要不要重发。
 
-    TWO MODES（由 client 上有无 pool 钩子区分）:
-    - 单浏览器：行为与历史完全一致（403 切账号 + 账号冷却、429 切号、传输失败快速重试）。
-    - pool（``ClientPool``）：403/401、5xx、502、页面传输失败都按 **worker 故障**处理——
-      后台重启那台 Chromium，本请求立刻切另一台重试；这些错误**不给账号加冷却**。
+    - pool（``ClientPool``）：403/401、5xx、页面传输失败、会话挂死 → 后台重启绑定的
+      worker；这些错误**不给账号加冷却**（不是配额问题）。
+    - 单浏览器：同样语义，重启 = 杀掉浏览器进程（下次请求 ``ensure_ready`` 重建）。
+    - 429 只记账（账号/模型配额冷却，下次请求调度器避开），不重启不重试。
+    - 登录态失效（SessionExpiredError）按账号隔离 24h 并重启浏览器，返回 401。
     """
     target_model = normalized_model or model_path
     pooled = _is_pool_client(client)
@@ -224,16 +222,26 @@ async def handle_attempt_exception(
         active_acc = account_svc.get_active_account() if account_svc else None
         failed_id = active_acc.id if active_acc else None
 
-    async def _pool_hook(name: str, *hook_args: object) -> bool:
-        """调用 pool 钩子（重启 worker + 返回「另一台现在能接」）；钩子异常不影响主流程。"""
-        hook = getattr(client, name, None)
-        if not callable(hook):
-            return False
-        try:
-            return bool(await hook(*hook_args))
-        except Exception as hook_exc:  # pragma: no cover - 防御：绝不让钩子把请求打成 500
-            logger.warning("%spool 钩子 %s 执行失败: %s", _rid(), name, hook_exc)
-            return False
+    async def _restart_browser(hook_name: str, *hook_args: object) -> None:
+        """重启无头浏览器：pool 后台重启绑定的 worker；单浏览器杀进程待重建。"""
+        if pooled:
+            hook = getattr(client, hook_name, None)
+            if not callable(hook):
+                return
+            try:
+                await hook(*hook_args)
+            except Exception as hook_exc:  # pragma: no cover - 防御：绝不让自愈把错误改写成 500
+                logger.warning(
+                    "%spool 钩子 %s 执行失败: %s", _rid(), hook_name, hook_exc
+                )
+            return
+        client.clear_templates()
+        session = client._session
+        if session is not None:
+            try:
+                await session._close_internal()
+            except Exception as close_exc:  # pragma: no cover
+                logger.warning("%s重启浏览器进程失败: %s", _rid(), close_exc)
 
     if isinstance(exc, ValueError):
         raise HTTPException(
@@ -243,37 +251,10 @@ async def handle_attempt_exception(
     if isinstance(exc, SessionExpiredError):
         logger.warning("%s账号会话失效，已被重定向到登录页: %s", _rid(), exc)
         client.clear_templates()
-        if pooled:
-            # 登录态失效是账号问题（隔离 24h），但 worker 也一起换掉：重启那台 + 切另一台
-            record_rotator_event(
-                "session_expired", model=target_model, account_id=failed_id
-            )
-            can = await _pool_hook("on_auth_error", target_model)
-            if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-                logger.info(
-                    "%s登录态失效：切另一台 worker 重试 (%d/%d)",
-                    _rid(),
-                    attempt + 1,
-                    MAX_RETRIES,
-                )
-                return True
-            raise HTTPException(
-                401,
-                detail={
-                    "message": "All accounts encountered login redirect or expired sessions. Please import fresh cookies.",
-                    "type": "auth_error",
-                },
-            ) from exc
-        if not has_yielded_data and await try_switch_account(
-            model=target_model,
-            failed_account_id=failed_id,
-            is_auth_error=True,
-            is_session_expired=True,
-        ):
-            logger.info(
-                "已切换至其他可用健康账号重试 (%d/%d)", attempt + 1, MAX_RETRIES
-            )
-            return True
+        record_rotator_event(
+            "session_expired", model=target_model, account_id=failed_id
+        )
+        await _restart_browser("on_auth_error", target_model)
         raise HTTPException(
             401,
             detail={
@@ -287,68 +268,18 @@ async def handle_attempt_exception(
             "%s账号 403 权限拒绝%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
         client.clear_templates()
-        if pooled:
-            # 用户 2026-10-19 拍板：403/401 不是配额问题，**不给账号加冷却**；
-            # 按 worker 故障处理（后台重启 + 本请求立刻切另一台）。
-            record_rotator_event("error", model=target_model, account_id=failed_id)
-            can = await _pool_hook("on_auth_error", target_model)
-            if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-                logger.info(
-                    "%s403/401 worker 故障：切另一台重试 (%d/%d)",
-                    _rid(),
-                    attempt + 1,
-                    MAX_RETRIES,
-                )
-                return True
-            raise HTTPException(
-                403, detail={"message": str(exc), "type": "auth_error"}
-            ) from exc
-        record_rotator_event("auth_error", model=target_model)
-        if not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id, is_auth_error=True
-        ):
-            logger.info("切换至可用账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
-            return True
+        # 403/401 不是配额问题（2026-10-19 拍板）：不给账号加冷却，按浏览器故障重启
+        record_rotator_event("error", model=target_model, account_id=failed_id)
+        await _restart_browser("on_auth_error", target_model)
         raise HTTPException(
             403, detail={"message": str(exc), "type": "auth_error"}
         ) from exc
 
     if isinstance(exc, UsageLimitExceeded):
         runtime_state.record(target_model, "rate_limited")
-        if pooled:
-            # 429 是真正的配额问题：保留账号/模型冷却；worker 也重启一份干净页面。
-            record_rotator_event(
-                "rate_limited", model=target_model, account_id=failed_id
-            )
-            can = await _pool_hook("on_rate_limited", target_model)
-            if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "%s429 触发限额：worker 冷却 + 切另一台重试 (%d/%d): model=%s",
-                    _rid(),
-                    attempt + 1,
-                    MAX_RETRIES,
-                    target_model,
-                )
-                return True
-            raise HTTPException(
-                429,
-                detail={
-                    "message": f"All accounts reached daily quota for model '{target_model}'. Quota resets at 00:00 PST.",
-                    "type": "rate_limit_exceeded",
-                },
-            ) from exc
-        record_rotator_event("rate_limited", model=target_model)
-        if not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id
-        ):
-            logger.info(
-                "429 触发限额，切换账号 (%d/%d): model=%s",
-                attempt + 1,
-                MAX_RETRIES,
-                target_model,
-            )
-            return True
-        logger.warning("%s全部账号在模型 %s 上均处于冷却状态", _rid(), target_model)
+        # 429 是真正的配额问题：保留账号/模型冷却（下次请求调度器会避开），不重启
+        record_rotator_event("rate_limited", model=target_model, account_id=failed_id)
+        logger.warning("%s429 触发限额: model=%s", _rid(), target_model)
         raise HTTPException(
             429,
             detail={
@@ -357,95 +288,17 @@ async def handle_attempt_exception(
             },
         ) from exc
 
-    if (
-        isinstance(exc, RequestError)
-        and exc.status == 204
-        and attempt == 0
-        and not has_yielded_data
-    ):
-        logger.warning("%sGemini 收到 204，清理模板缓存后重试一次", _rid())
-        client.clear_templates()
-        return True
-
-    # 针对 Google 上游偶发且完全随机的 RPC 路由 404 (Ambiguous request for service '' and method '/GenerativeService.*')：
-    # 此报错为上游端点偶发抖动，在未产生输出时当场立即重试（严禁切号以防浪费配额，其他 404 严格按原样报错抛出）
-    if is_transient_rpc_error(exc) and not has_yielded_data and attempt < MAX_RETRIES - 1:
-        logger.warning(
-            "%s检测到 Google 上游偶发 404 (Ambiguous RPC method)，当场立即重试 (%d/%d): %s",
-            _rid(),
-            attempt + 1,
-            MAX_RETRIES,
-            clean_upstream_error_message(str(exc)),
-        )
-        client.clear_templates()
-        return True
-
     if isinstance(exc, BrowserTransportError):
-        # 页面里的 fetch/XHR 网络失败（`Failed to fetch` 这类）：请求拿不到任何响应。
-        if pooled:
-            # pool 模式：这是「这台浏览器坏了」的信号——后台重启它，本请求立刻切另一台。
-            # 不再受「20s 内才重试」限制：失败的那台已经在重启，重试不会拖长窗口。
-            record_rotator_event("error", model=target_model, account_id=failed_id)
-            can = await _pool_hook("on_transport_error", target_model)
-            if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "%s页面传输失败%s：切另一台 worker 重试 (%d/%d): %s",
-                    _rid(),
-                    _fmt_elapsed(attempt_elapsed_s),
-                    attempt + 1,
-                    MAX_RETRIES,
-                    clean_upstream_error_message(str(exc)),
-                )
-                return True
-            logger.error(
-                "%s浏览器页面请求失败%s，无可用备用 worker: %s",
-                _rid(),
-                _fmt_elapsed(attempt_elapsed_s),
-                clean_upstream_error_message(str(exc)),
-            )
-            raise HTTPException(
-                502,
-                detail={
-                    "message": clean_upstream_error_message(str(exc)),
-                    "type": "upstream_error",
-                },
-            ) from exc
-        # 单浏览器路径：只有「很快就失败」才当作瞬时抖动重试（历史逻辑，保持不变）。
-        elapsed_text = _fmt_elapsed(attempt_elapsed_s)
-        quick_failure = (
-            attempt_elapsed_s is None
-            or attempt_elapsed_s <= _BROWSER_TRANSPORT_RETRY_MAX_S
-        )
-        if not has_yielded_data and attempt < MAX_RETRIES - 1 and quick_failure:
-            logger.warning(
-                "%s浏览器页面请求失败%s，重试 %d/%d: %s",
-                _rid(),
-                elapsed_text,
-                attempt + 1,
-                MAX_RETRIES,
-                clean_upstream_error_message(str(exc)),
-            )
-            client.clear_templates()
-            session = getattr(client, "_session", None)
-            if session is not None:
-                alive = True
-                try:
-                    alive = await session.is_alive(timeout_s=1.0)
-                except Exception:
-                    alive = False
-                if not alive:
-                    logger.warning("%s浏览器页面已不可用，重建会话后重试", _rid())
-                    try:
-                        await session.close()
-                    except Exception as close_exc:
-                        logger.warning("%s重建会话失败: %s", _rid(), close_exc)
-            return True
-        logger.error(
-            "%s浏览器页面请求失败%s，不再重试: %s",
+        # 页面里的 fetch/XHR 网络失败（Failed to fetch 这类）：这台浏览器坏了。
+        # 重启它救**后续**请求；本次请求 502，客户端要重试就重发一条新请求。
+        record_rotator_event("error", model=target_model, account_id=failed_id)
+        logger.warning(
+            "%s浏览器页面请求失败%s，后台重启浏览器，本次请求 502: %s",
             _rid(),
-            elapsed_text,
+            _fmt_elapsed(attempt_elapsed_s),
             clean_upstream_error_message(str(exc)),
         )
+        await _restart_browser("on_transport_error", target_model)
         raise HTTPException(
             502,
             detail={
@@ -455,74 +308,35 @@ async def handle_attempt_exception(
         ) from exc
 
     if is_browser_session_hang_error(exc):
+        # 模板/BotGuard 捕获挂死：这台浏览器坏了，重启它
         logger.warning(
-            "%s模板或 BotGuard 捕获超时%s (%d/%d): %s",
+            "%s模板或 BotGuard 捕获超时%s，后台重启浏览器: %s",
             _rid(),
             _fmt_elapsed(attempt_elapsed_s),
-            attempt + 1,
-            MAX_RETRIES,
             exc,
         )
         client.clear_templates()
-        if pooled:
-            # 页面挂死 = 这台 worker 坏了：后台重启 + 本请求切另一台
-            record_rotator_event("error", model=target_model, account_id=failed_id)
-            can = await _pool_hook("on_transport_error", target_model)
-            if not has_yielded_data and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "%s会话挂起：后台重启当前 worker%s，切另一台重试 %d/%d",
-                    _rid(),
-                    "" if can else "（暂无备用，等待重启完成）",
-                    attempt + 1,
-                    MAX_RETRIES,
-                )
-                return True
-            raise HTTPException(
-                502,
-                detail={"message": str(exc), "type": "upstream_error"},
-            ) from exc
-        if not has_yielded_data and await try_switch_account(
-            model=target_model, failed_account_id=failed_id, is_auth_error=False
-        ):
-            logger.info("已切换账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
-            return True
-        if attempt < 2 and not has_yielded_data:
-            if client._session is not None:
-                await client._session._close_internal()
-            return True
-
-    if isinstance(exc, RequestError) and pooled and exc.status >= 500:
-        # pool 模式：5xx 也按 worker 故障处理（重启 + 切另一台），但**不给账号冷却**，
-        # 并且最终仍按上游原始状态码抛（不能变成 500）。
-        clean_msg = clean_upstream_error_message(str(exc))
-        status_code = exc.status if exc.status > 0 else 500
         record_rotator_event("error", model=target_model, account_id=failed_id)
-        can = await _pool_hook("on_server_error", target_model, status_code)
-        if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-            logger.warning(
-                "%s上游 %d%s：按 worker 故障切另一台重试 (%d/%d): %s",
-                _rid(),
-                status_code,
-                _fmt_elapsed(attempt_elapsed_s),
-                attempt + 1,
-                MAX_RETRIES,
-                clean_msg,
-            )
-            return True
-        logger.warning(
-            "%s上游 %d%s，无可用备用 worker: %s",
-            _rid(),
-            status_code,
-            _fmt_elapsed(attempt_elapsed_s),
-            clean_msg,
-        )
+        await _restart_browser("on_transport_error", target_model)
         raise HTTPException(
-            status_code, detail={"message": clean_msg, "type": "upstream_error"}
+            502, detail={"message": str(exc), "type": "upstream_error"}
         ) from exc
 
     if isinstance(exc, RequestError):
         clean_msg = clean_upstream_error_message(str(exc))
         status_code = exc.status if exc.status > 0 else 500
+        if status_code >= 500 and pooled:
+            # 5xx 按浏览器故障处理（重启 worker），但最终仍按上游原始状态码抛
+            record_rotator_event("error", model=target_model, account_id=failed_id)
+            await _restart_browser("on_server_error", target_model, status_code)
+        else:
+            logger.warning(
+                "%sGemini 上游请求错误 (%d)%s: %s",
+                _rid(),
+                status_code,
+                _fmt_elapsed(attempt_elapsed_s),
+                clean_msg,
+            )
         error_type = (
             "bad_request"
             if status_code == 400
@@ -530,43 +344,13 @@ async def handle_attempt_exception(
             if status_code == 404
             else "upstream_error"
         )
-        logger.warning(
-            "%sGemini 上游请求错误 (%d)%s: %s",
-            _rid(),
-            status_code,
-            _fmt_elapsed(attempt_elapsed_s),
-            clean_msg,
-        )
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
         ) from exc
 
     if isinstance(exc, AistudioError):
         runtime_state.record(target_model, "errors")
-        if pooled:
-            # 其余上游异常同样按 worker 故障处理：重启 + 切另一台（仍未吐数据时）
-            record_rotator_event("error", model=target_model, account_id=failed_id)
-            can = await _pool_hook("on_server_error", target_model, 500)
-            if not has_yielded_data and can and attempt < MAX_RETRIES - 1:
-                logger.warning(
-                    "%s服务端异常%s：按 worker 故障切另一台重试 (%d/%d): %s",
-                    _rid(),
-                    _fmt_elapsed(attempt_elapsed_s),
-                    attempt + 1,
-                    MAX_RETRIES,
-                    exc,
-                )
-                return True
-            logger.warning(
-                "%sGemini 服务端异常%s: %s",
-                _rid(),
-                _fmt_elapsed(attempt_elapsed_s),
-                exc,
-            )
-            raise HTTPException(
-                500, detail={"message": str(exc), "type": "server_error"}
-            ) from exc
-        record_rotator_event("error", model=target_model)
+        record_rotator_event("error", model=target_model, account_id=failed_id)
         logger.warning(
             "%sGemini 服务端异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
@@ -575,7 +359,7 @@ async def handle_attempt_exception(
         ) from exc
 
     runtime_state.record(target_model, "errors")
-    record_rotator_event("error", model=target_model)
+    record_rotator_event("error", model=target_model, account_id=failed_id)
     logger.error(
         "%sGemini 未知严重异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
     )
@@ -617,83 +401,60 @@ async def generate_content_output(
     req: GeminiGenerateContentRequest,
     client: AIStudioClient,
 ) -> tuple[PreparedRequest, ModelOutput]:
-    """非流式上游调用（含账号轮换/重试），返回归一化请求与上游输出。
+    """非流式上游调用（单次，绝不重试），返回归一化请求与上游输出。
 
     失败时按既有规则抛 HTTPException——OpenAI 桥会把它翻成 OpenAI 错误体。
     """
-    last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        await ensure_active_account(attempt, model=model_path)
-        prepared: PreparedRequest | None = None
-        attempt_started = time.perf_counter()
-        try:
-            prepared = prepare_gemini_request(req, model_path)
-            normalized = prepared.normalized
-            logger.debug(
-                "%s上游尝试 %d/%d (非流式): model=%s, 对话轮数=%d",
-                _rid(),
-                attempt + 1,
-                MAX_RETRIES,
-                normalized.model,
-                len(req.contents),
-            )
-            output = await client.generate_content(
-                model=normalized.model,
-                capture_prompt=normalized.capture_prompt,
-                capture_images=normalized.capture_images,
-                contents=normalized.contents,
-                system_instruction_content=normalized.system_instruction,
-                tools=normalized.tools,
-                tool_config=normalized.tool_config,
-                safety_settings=normalized.safety_settings,
-                temperature=normalized.temperature,
-                top_p=normalized.top_p,
-                top_k=normalized.top_k,
-                max_tokens=normalized.max_tokens,
-                generation_config_overrides=normalized.generation_config_overrides,
-                sanitize_plain_text=False,
-            )
+    await ensure_active_account(model=model_path)
+    prepared: PreparedRequest | None = None
+    attempt_started = time.perf_counter()
+    try:
+        prepared = prepare_gemini_request(req, model_path)
+        normalized = prepared.normalized
+        logger.debug(
+            "%s上游调用 (非流式): model=%s, 对话轮数=%d",
+            _rid(),
+            normalized.model,
+            len(req.contents),
+        )
+        output = await client.generate_content(
+            model=normalized.model,
+            capture_prompt=normalized.capture_prompt,
+            capture_images=normalized.capture_images,
+            contents=normalized.contents,
+            system_instruction_content=normalized.system_instruction,
+            tools=normalized.tools,
+            tool_config=normalized.tool_config,
+            safety_settings=normalized.safety_settings,
+            temperature=normalized.temperature,
+            top_p=normalized.top_p,
+            top_k=normalized.top_k,
+            max_tokens=normalized.max_tokens,
+            generation_config_overrides=normalized.generation_config_overrides,
+            sanitize_plain_text=False,
+        )
 
-            record_rotator_event(
-                "success",
-                model=normalized.model,
-                account_id=_pool_account_id(),
-            )
-            runtime_state.record(normalized.model, "success", output.usage)
-            logger.debug(
-                "%s上游返回: 输入Tokens=%s, 输出Tokens=%s",
-                _rid(),
-                output.usage.get("prompt_tokens") if output.usage else 0,
-                output.usage.get("completion_tokens") if output.usage else 0,
-            )
-            return prepared, output
-        except Exception as exc:
-            last_error = exc
-            if await handle_attempt_exception(
-                exc,
-                attempt=attempt,
-                model_path=model_path,
-                normalized_model=prepared.normalized.model if prepared else None,
-                client=client,
-                attempt_elapsed_s=time.perf_counter() - attempt_started,
-            ):
-                continue
-            raise
-
-    # 循环走满 = 最后一次失败被判「可重试」但 attempts 已用尽（单浏览器路径的切号
-    # 分支没有 attempt 守卫）。按真实错误分类抛，别一律谎报成 429 配额耗尽。
-    if last_error is None or isinstance(last_error, UsageLimitExceeded):
-        raise HTTPException(
-            429,
-            detail={
-                "message": f"All accounts reached daily quota for model '{model_path}'. Quota resets at 00:00 PST.",
-                "type": "rate_limit_exceeded",
-            },
-        ) from last_error
-    code, message, _status = classify_gemini_error_payload(last_error)
-    raise HTTPException(
-        code, detail={"message": message, "type": "upstream_error"}
-    ) from last_error
+        record_rotator_event(
+            "success",
+            model=normalized.model,
+            account_id=_pool_account_id(),
+        )
+        runtime_state.record(normalized.model, "success", output.usage)
+        logger.debug(
+            "%s上游返回: 输入Tokens=%s, 输出Tokens=%s",
+            _rid(),
+            output.usage.get("prompt_tokens") if output.usage else 0,
+            output.usage.get("completion_tokens") if output.usage else 0,
+        )
+        return prepared, output
+    except Exception as exc:
+        await handle_attempt_exception(
+            exc,
+            model_path=model_path,
+            normalized_model=prepared.normalized.model if prepared else None,
+            client=client,
+            attempt_elapsed_s=time.perf_counter() - attempt_started,
+        )
 
 
 async def handle_gemini_generate_content(
@@ -849,73 +610,50 @@ def format_sse_error(exc: Exception) -> str:
     )
 
 
-# 会产生「真实输出」的流式事件：只有它们才算已经向客户端发过数据（用到重试判定里）。
-_DATA_STREAM_EVENTS = frozenset(
-    {"body", "thinking", "tool_calls", "images", "reasoning_images"}
-)
-
-
 async def stream_raw_events(
     model_path: str,
     req: GeminiGenerateContentRequest,
     client: AIStudioClient,
 ):
-    """流式上游调用（含账号轮换/重试）的公共入口。
+    """流式上游调用（单次，绝不重试）的公共入口。
 
-    产出 ``("prepared", PreparedRequest)`` 一次（重试时会再产一次），随后原样转发
-    ``client.stream_generate_content`` 的事件；重试耗尽仍失败时抛出最后的异常
-    （由 Gemini SSE / OpenAI SSE 各自决定怎么把错误写给客户端）。
+    产出 ``("prepared", PreparedRequest)`` 一次，随后原样转发
+    ``client.stream_generate_content`` 的事件；失败时 ``handle_attempt_exception``
+    抛出最终错误（由 Gemini SSE / OpenAI SSE 各自渲染成错误帧）。
     """
-    last_stream_error: Exception | None = None
-    for stream_attempt in range(MAX_RETRIES):
-        has_yielded_data = False
-        attempt_started = time.perf_counter()
-        await ensure_active_account(stream_attempt, model=model_path)
-        prepared: PreparedRequest | None = None
-        try:
-            prepared = prepare_gemini_request(req, model_path)
-            normalized = prepared.normalized
-            yield ("attempt", stream_attempt + 1)
-            yield ("prepared", prepared)
-            async for event_type, text in client.stream_generate_content(
-                model=normalized.model,
-                capture_prompt=normalized.capture_prompt,
-                capture_images=normalized.capture_images,
-                contents=normalized.contents,
-                system_instruction_content=normalized.system_instruction,
-                tools=normalized.tools,
-                tool_config=normalized.tool_config,
-                safety_settings=normalized.safety_settings,
-                temperature=normalized.temperature,
-                top_p=normalized.top_p,
-                top_k=normalized.top_k,
-                max_tokens=normalized.max_tokens,
-                generation_config_overrides=normalized.generation_config_overrides,
-                sanitize_plain_text=False,
-                force_refresh_capture=stream_attempt > 0,
-            ):
-                if event_type in _DATA_STREAM_EVENTS and text:
-                    has_yielded_data = True
-                yield (event_type, text)
-            return
-        except Exception as exc:
-            last_stream_error = exc
-            if await handle_attempt_exception(
-                exc,
-                attempt=stream_attempt,
-                model_path=model_path,
-                normalized_model=prepared.normalized.model if prepared else None,
-                client=client,
-                has_yielded_data=has_yielded_data,
-                attempt_elapsed_s=time.perf_counter() - attempt_started,
-            ):
-                continue
-            raise
-
-    # 循环走满 = 最后一次失败被判「可重试」但 attempts 已用尽。必须把错误抛出去
-    # （消费方渲染成流内错误帧），否则客户端只会看到一条静默的空流。
-    if last_stream_error is not None:
-        raise last_stream_error
+    await ensure_active_account(model=model_path)
+    prepared: PreparedRequest | None = None
+    attempt_started = time.perf_counter()
+    try:
+        prepared = prepare_gemini_request(req, model_path)
+        normalized = prepared.normalized
+        yield ("attempt", 1)
+        yield ("prepared", prepared)
+        async for event_type, text in client.stream_generate_content(
+            model=normalized.model,
+            capture_prompt=normalized.capture_prompt,
+            capture_images=normalized.capture_images,
+            contents=normalized.contents,
+            system_instruction_content=normalized.system_instruction,
+            tools=normalized.tools,
+            tool_config=normalized.tool_config,
+            safety_settings=normalized.safety_settings,
+            temperature=normalized.temperature,
+            top_p=normalized.top_p,
+            top_k=normalized.top_k,
+            max_tokens=normalized.max_tokens,
+            generation_config_overrides=normalized.generation_config_overrides,
+            sanitize_plain_text=False,
+        ):
+            yield (event_type, text)
+    except Exception as exc:
+        await handle_attempt_exception(
+            exc,
+            model_path=model_path,
+            normalized_model=prepared.normalized.model if prepared else None,
+            client=client,
+            attempt_elapsed_s=time.perf_counter() - attempt_started,
+        )
 
 
 def _build_gemini_streaming_response(
