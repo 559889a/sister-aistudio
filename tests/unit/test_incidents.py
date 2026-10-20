@@ -207,3 +207,59 @@ async def test_nonstream_empty_200_body_raises_transport_error():
     with pytest.raises(BrowserTransportError) as exc_info:
         await client.generate_content(model="m", capture_prompt="p")
     assert "empty 200" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_lands_probe_in_incidents(tmp_path, monkeypatch):
+    """上游流中途死：stream_probe（死前收到多少/多久）必须落进 incidents.jsonl。"""
+    from unittest.mock import MagicMock
+
+    from aistudio_api.infrastructure.upstreams.common import (
+        ChannelBypassExtractor,
+    )
+    from aistudio_api.infrastructure.upstreams import vertex_express as ve
+    from aistudio_api.application import api_service_gemini as svc
+
+    monkeypatch.setenv("AISTUDIO_DATA_DIR", str(tmp_path))
+
+    class _Stream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("upstream died after long silence")
+
+    class _FakeModels:
+        async def generate_content_stream(self, **_kw):
+            return _Stream()
+
+    class _FakeAio:
+        models = _FakeModels()
+
+    client = object.__new__(ve.VertexExpressClient)
+    client._client = MagicMock()
+    client._client.aio = _FakeAio()
+    client._project_id = ""
+    client._location = ""
+    client._session = None
+
+    async def _noop(model=None):
+        return None
+
+    monkeypatch.setattr(svc, "ensure_active_account", _noop)
+
+    from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
+
+    contents = [AistudioContent.from_user_prompt("hi")]
+    with pytest.raises(Exception) as exc_info:
+        async for _ in client.stream_generate_content(model="m", capture_prompt="p", contents=contents):
+            pass
+    probe = getattr(exc_info.value, "stream_probe", None)
+    assert probe and probe["channel"] == "vertex_express" and probe["error_class"]
+    # 走一遍网关错误处理，确认 incidents 收到 stream_probe
+    with pytest.raises(Exception):
+        await svc.handle_attempt_exception(
+            exc_info.value, model_path="m", normalized_model="m", client=MagicMock()
+        )
+    rows = [json.loads(x) for x in (tmp_path / "incidents.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(r.get("stream_probe", {}).get("channel") == "vertex_express" for r in rows)

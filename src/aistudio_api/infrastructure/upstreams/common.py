@@ -11,7 +11,7 @@ wire → 官方（请求侧）、官方 → wire 语义（响应侧，产出 Mod
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import Candidate, GeneratedImage, ModelOutput
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     )
 
 logger = get_logger("upstreams.common")
+
+E = TypeVar("E", bound=BaseException)
 
 # 与 chat_service.SCHEMA_TYPE_CODES 互逆（wire 下标 0 的类型码 → 官方 type 名）
 _WIRE_TYPE_NAMES = {1: "STRING", 2: "NUMBER", 3: "INTEGER", 4: "BOOLEAN", 5: "ARRAY", 6: "OBJECT"}
@@ -478,3 +480,70 @@ def apply_extractor_nonstream(output, extractor: ChannelBypassExtractor) -> None
     for event, payload in extractor.finish_events():
         if event == "body" and isinstance(payload, str):
             candidate.text = (candidate.text or "") + payload
+
+
+def attach_stream_probe(exc: E, probe: dict) -> E:
+    """把「死前现场」挂到异常上（incidents.jsonl 的 request_failure 会自动带走）。
+
+    用户 2026-10-20 指令：502 检测点塞探针。要回答的是那个恶心场景——
+    「输出大半天→超时报错→内容一点都没了」：死的时候到底收到了多少块/
+    多少字、第一块何时到、错在哪个环节。抗抖动实验已证明亚秒级波动不死，
+    真凶更可能是长静默被上游掐——elapsed + 零内容的组合会直接指认它。
+    """
+    try:
+        merged = dict(getattr(exc, "stream_probe", None) or {})
+        merged.update(probe)
+        exc.stream_probe = merged  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return exc
+
+
+def new_stream_probe(channel: str, model: str) -> dict[str, object]:
+    """流式探针的初始状态（通道内就地更新 stats 字段）。"""
+    import time as _time
+
+    return {
+        "channel": channel,
+        "model": model,
+        "t_start": _time.time(),
+        "t_first": None,
+        "t_last": None,
+        "chunks_seen": 0,
+        "body_emitted": 0,
+        "thinking_emitted": 0,
+        "finish_seen": False,
+    }
+
+
+def touch_stream_probe(probe: dict, *, body_chars: int = 0, thinking_chars: int = 0, finish: bool = False) -> None:
+    import time as _time
+
+    now = _time.time()
+    probe["chunks_seen"] = int(probe.get("chunks_seen", 0)) + 1
+    if probe.get("t_first") is None:
+        probe["t_first"] = now
+    probe["t_last"] = now
+    probe["body_emitted"] = int(probe.get("body_emitted", 0)) + body_chars
+    probe["thinking_emitted"] = int(probe.get("thinking_emitted", 0)) + thinking_chars
+    if finish:
+        probe["finish_seen"] = True
+
+
+def finalize_stream_probe(probe: dict, exc: BaseException) -> dict:
+    """补上 elapsed/错误类别后返回完整现场（attach_stream_probe 用）。"""
+    import time as _time
+
+    out = dict(probe)
+    start = out.get("t_start")
+    out["elapsed_s"] = round(_time.time() - start, 1) if isinstance(start, float) else None
+    for key in ("t_first", "t_last"):
+        value = out.get(key)
+        if isinstance(value, float) and isinstance(start, float):
+            out[key] = round(value - start, 1)
+    out["error_class"] = type(exc).__name__
+    code = getattr(exc, "code", None)
+    if code is not None:
+        out["error_code"] = code
+    out["error"] = str(exc)[:300]
+    return out

@@ -11,14 +11,19 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
+from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
     ChannelBypassExtractor,
+    attach_stream_probe,
     bypass_tool_config_official,
     bypass_tools_official,
     channel_streaming_flag_enabled,
     contents_to_official,
+    finalize_stream_probe,
     maybe_channel_bypass,
+    new_stream_probe,
+    official_chunk_events,
     official_to_model_output,
     upstream_http_error,
     wire_safety_to_official,
@@ -172,12 +177,22 @@ class VertexExpressClient:
         from google.genai import errors as genai_errors
 
         kwargs, plan = self._call_kwargs(model, **params)
+        probe = new_stream_probe("vertex_express", model)
         try:
             resp = await self._client.aio.models.generate_content(**kwargs)
         except genai_errors.APIError as exc:
-            raise upstream_http_error(
-                int(getattr(exc, "code", 0) or 0),
-                str(getattr(exc, "message", "") or exc),
+            raise attach_stream_probe(
+                upstream_http_error(
+                    int(getattr(exc, "code", 0) or 0),
+                    str(getattr(exc, "message", "") or exc),
+                ),
+                finalize_stream_probe(probe, exc),
+            ) from exc
+        except Exception as exc:
+            # 传输层失败（超时/断流）：502 语义 + 现场探针
+            raise attach_stream_probe(
+                RequestError(502, f"vertex_express transport: {exc}"),
+                finalize_stream_probe(probe, exc),
             ) from exc
         data = self._dump(resp)
         output = official_to_model_output(data, model)
@@ -196,19 +211,33 @@ class VertexExpressClient:
 
         kwargs, plan = self._call_kwargs(model, **params)
         extractor = ChannelBypassExtractor(plan) if plan is not None else None
+        probe = new_stream_probe("vertex_express", model)
+        from aistudio_api.infrastructure.upstreams.common import (
+            touch_stream_probe,
+        )
+
         try:
             stream = await self._client.aio.models.generate_content_stream(**kwargs)
             yield ("status", 200)
             async for chunk in stream:
                 data = self._dump(chunk)
+                body_chars = sum(
+                    len(p.get("text") or "")
+                    for c in data.get("candidates") or []
+                    for p in (c.get("content") or {}).get("parts") or []
+                    if isinstance(p, dict) and not p.get("thought")
+                )
+                think_chars = sum(
+                    len(p.get("text") or "")
+                    for c in data.get("candidates") or []
+                    for p in (c.get("content") or {}).get("parts") or []
+                    if isinstance(p, dict) and p.get("thought")
+                )
+                touch_stream_probe(probe, body_chars=body_chars, thinking_chars=think_chars)
                 if extractor is not None:
                     for event in extractor.feed_data(data):
                         yield event
                 else:
-                    from aistudio_api.infrastructure.upstreams.common import (
-                        official_chunk_events,
-                    )
-
                     for event in official_chunk_events(data):
                         yield event
             if extractor is not None:
@@ -216,7 +245,16 @@ class VertexExpressClient:
                     yield event
             yield ("done", None)
         except genai_errors.APIError as exc:
-            raise upstream_http_error(
-                int(getattr(exc, "code", 0) or 0),
-                str(getattr(exc, "message", "") or exc),
+            raise attach_stream_probe(
+                upstream_http_error(
+                    int(getattr(exc, "code", 0) or 0),
+                    str(getattr(exc, "message", "") or exc),
+                ),
+                finalize_stream_probe(probe, exc),
+            ) from exc
+        except Exception as exc:
+            # 传输层失败（超时/断流）：502 语义 + 现场探针（用户 2026-10-20 指令）
+            raise attach_stream_probe(
+                RequestError(502, f"vertex_express transport: {exc}"),
+                finalize_stream_probe(probe, exc),
             ) from exc

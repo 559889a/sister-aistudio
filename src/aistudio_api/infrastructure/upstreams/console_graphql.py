@@ -28,11 +28,14 @@ from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
     ChannelBypassExtractor,
     apply_extractor_nonstream,
+    attach_stream_probe,
     bypass_tool_config_official,
     bypass_tools_official,
     channel_streaming_flag_enabled,
     contents_to_official,
+    finalize_stream_probe,
     maybe_channel_bypass,
+    new_stream_probe,
     official_chunk_events,
     official_to_model_output,
     wire_safety_to_official,
@@ -241,7 +244,8 @@ class ConsoleGraphqlClient:
             }
         if plan is not None:
             tools_official = bypass_tools_official(plan.tool_name)
-            for decl in tools_official[0]["functionDeclarations"]:
+            decls = tools_official[0].get("functionDeclarations")
+            for decl in decls if isinstance(decls, list) else []:
                 if isinstance(decl.get("parameters"), dict):
                     decl["parameters"] = _ui_schema(decl["parameters"])
             variables["tools"] = tools_official
@@ -334,19 +338,31 @@ class ConsoleGraphqlClient:
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
         body, plan = self._build_body(model, **params)
         extractor = ChannelBypassExtractor(plan) if plan is not None else None
+        probe = new_stream_probe("console_graphql", model)
         aggregated: dict[str, Any] = {"candidates": []}
         texts: list[str] = []
-        async for data in self._stream_data(body):
-            events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
-            for event, payload in events:
-                if event == "body":
-                    texts.append(str(payload))
-                elif event == "usage":
-                    aggregated["usageMetadata"] = payload
-        if extractor is not None:
-            for event, payload in extractor.finish_events():
-                if event == "body" and isinstance(payload, str):
-                    texts.append(payload)
+        try:
+            async for data in self._stream_data(body):
+                events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
+                for event, payload in events:
+                    if event == "body":
+                        texts.append(str(payload))
+                    elif event == "usage":
+                        aggregated["usageMetadata"] = payload
+            if extractor is not None:
+                for event, payload in extractor.finish_events():
+                    if event == "body" and isinstance(payload, str):
+                        texts.append(payload)
+        except RequestError as exc:
+            raise attach_stream_probe(exc, finalize_stream_probe(probe, exc)) from exc
+        except Exception as exc:
+            from aistudio_api.infrastructure.upstreams.common import touch_stream_probe
+
+            touch_stream_probe(probe)
+            raise attach_stream_probe(
+                RequestError(502, f"console_graphql transport: {exc}"),
+                finalize_stream_probe(probe, exc),
+            ) from exc
         if texts:
             aggregated["candidates"] = [
                 {"content": {"parts": [{"text": "".join(texts)}]}, "finishReason": "STOP"}
@@ -363,14 +379,34 @@ class ConsoleGraphqlClient:
     ) -> AsyncIterator[tuple[str, object]]:
         body, plan = self._build_body(model, **params)
         extractor = ChannelBypassExtractor(plan) if plan is not None else None
+        probe = new_stream_probe("console_graphql", model)
+        from aistudio_api.infrastructure.upstreams.common import touch_stream_probe
+
         yield ("status", 200)
-        async for data in self._stream_data(body):
-            events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
-            for event in events:
-                yield event
-        if extractor is not None:
-            for event in extractor.finish_events():
-                yield event
+        try:
+            async for data in self._stream_data(body):
+                touch_stream_probe(
+                    probe,
+                    body_chars=sum(
+                        len(p.get("text") or "")
+                        for c in data.get("candidates") or []
+                        for p in (c.get("content") or {}).get("parts") or []
+                        if isinstance(p, dict) and not p.get("thought")
+                    ),
+                )
+                events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
+                for event in events:
+                    yield event
+            if extractor is not None:
+                for event in extractor.finish_events():
+                    yield event
+        except RequestError as exc:
+            raise attach_stream_probe(exc, finalize_stream_probe(probe, exc)) from exc
+        except Exception as exc:
+            raise attach_stream_probe(
+                RequestError(502, f"console_graphql transport: {exc}"),
+                finalize_stream_probe(probe, exc),
+            ) from exc
         yield ("done", None)
 
     async def _stream_data(self, body: dict[str, object]) -> AsyncIterator[dict]:

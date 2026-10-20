@@ -220,6 +220,7 @@ async def _capture_failure_evidence(
             ),
             "page_state": page_state,
             "net_evidence": net,
+            "stream_probe": getattr(exc, "stream_probe", None),
             "raw_upstream_body": getattr(exc, "raw_upstream_body", "") or "",
             "traceback": traceback.format_exc()[:4000],
         },

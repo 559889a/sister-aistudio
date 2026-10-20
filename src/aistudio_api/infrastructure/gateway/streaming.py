@@ -182,37 +182,57 @@ class StreamingGateway:
             if candidate.thought_signature:
                 yield ("thought_signature", candidate.thought_signature)
 
-        async for event_type, payload in self._session.send_streaming_request(
-            body=modified_body,
-            url=captured.url,
-            headers=captured.headers,
-        ):
-            if event_type == "status" and payload and not status_code:
-                status_code = int(str(payload))
-                if status_code == 200 and pending_prefill:
-                    yield ("body", pending_prefill)
-                    pending_prefill = ""
-                # 让上层能看到「响应头已到」——诊断长静默时用它区分
-                # 「连头和状态都没拿到」还是「有响应头但迟迟没有正文」。
-                yield ("status", status_code)
-            elif event_type == "chunk" and payload:
-                # 只有确认 200 才把预填充发给客户端；错误状态带 body 的流
-                # 不能先吐一段正文再报错
-                if pending_prefill and status_code == 200:
-                    yield ("body", pending_prefill)
-                    pending_prefill = ""
-                if isinstance(payload, bytes):
-                    text_payload = payload.decode("utf-8", errors="replace")
-                else:
-                    text_payload = str(payload)
-                raw_parts.append(text_payload)
-                for parsed_chunk in parser.feed(text_payload):
-                    for event in _consume(parsed_chunk):
-                        yield event
+        import time as _time
+
+        wire_t0 = _time.time()
+        try:
+            async for event_type, payload in self._session.send_streaming_request(
+                body=modified_body,
+                url=captured.url,
+                headers=captured.headers,
+            ):
+                if event_type == "status" and payload and not status_code:
+                    status_code = int(str(payload))
+                    if status_code == 200 and pending_prefill:
+                        yield ("body", pending_prefill)
+                        pending_prefill = ""
+                    # 让上层能看到「响应头已到」——诊断长静默时用它区分
+                    # 「连头和状态都没拿到」还是「有响应头但迟迟没有正文」。
+                    yield ("status", status_code)
+                elif event_type == "chunk" and payload:
+                    # 只有确认 200 才把预填充发给客户端；错误状态带 body 的流
+                    # 不能先吐一段正文再报错
+                    if pending_prefill and status_code == 200:
+                        yield ("body", pending_prefill)
+                        pending_prefill = ""
+                    if isinstance(payload, bytes):
+                        text_payload = payload.decode("utf-8", errors="replace")
+                    else:
+                        text_payload = str(payload)
+                    raw_parts.append(text_payload)
+                    for parsed_chunk in parser.feed(text_payload):
+                        for event in _consume(parsed_chunk):
+                            yield event
+                        if latest_finish_reason is not None:
+                            break
                     if latest_finish_reason is not None:
                         break
-                if latest_finish_reason is not None:
-                    break
+        except Exception as exc:  # type: ignore[misc]
+            # 502 探针（用户 2026-10-20 指令）：死前现场。长静默被上游掐的指纹
+            # 是 elapsed 大 + 已收字节少；真断流则是 bytes 已有不少。
+            from aistudio_api.infrastructure.upstreams.common import (
+                attach_stream_probe,
+                finalize_stream_probe,
+                new_stream_probe,
+            )
+
+            probe = new_stream_probe("pg", model)
+            probe["chunks_seen"] = len(raw_parts)
+            probe["wire_bytes"] = sum(len(p) for p in raw_parts)
+            probe["elapsed_s"] = round(_time.time() - wire_t0, 1)
+            attach_stream_probe(exc, finalize_stream_probe(probe, exc))
+            raise  # type: ignore[misc]  # 原异常重抛（已带 stream_probe），保持原类型与异常链
+
         # 上游流可能被截断（网络断、页面 abort）而最后一个 chunk 只收到一半：
         # parser.finish() 把它抢救出来，仍然走 _consume，最后一段正文不会丢。
         for parsed_chunk in parser.finish():
