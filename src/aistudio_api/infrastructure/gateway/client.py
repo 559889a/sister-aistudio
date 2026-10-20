@@ -15,7 +15,11 @@ from aistudio_api.config import (
     DEFAULT_TEXT_MODEL,
     settings,
 )
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import (
+    BrowserTransportError,
+    RequestError,
+    classify_error,
+)
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.gateway.capture import (
     CapturedRequest,
@@ -285,6 +289,10 @@ class AIStudioClient:
                     err = classify_error(status, raw_text)
                     err.raw_upstream_body = raw_text[:8192]  # 故障现场留档
                     raise err
+                if not raw_text.strip():
+                    # 连接被重置时 Chrome 可能把「只有响应头、零字节正文」当正常完成
+                    # （2026-10-20 RST 实验实测）——静默空输出比报错更糟，按传输失败处理
+                    raise BrowserTransportError("empty 200 body (connection truncated)")
                 output = parse_text_output(raw_text)
                 output.model = model
                 return self._restore_runtime_output(output, raw_text, captured)
@@ -369,6 +377,10 @@ class AIStudioClient:
                     err = classify_error(status, raw_text)
                     err.raw_upstream_body = raw_text[:8192]  # 故障现场留档
                     raise err
+                if not raw_text.strip():
+                    # 连接被重置时 Chrome 可能把「只有响应头、零字节正文」当正常完成
+                    # （2026-10-20 RST 实验实测）——静默空输出比报错更糟，按传输失败处理
+                    raise BrowserTransportError("empty 200 body (connection truncated)")
                 output = parse_image_output(raw_text)
                 output.model = model
                 output = self._restore_runtime_output(output, raw_text, captured)

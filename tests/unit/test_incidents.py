@@ -147,3 +147,63 @@ def test_hook_chain_failures_classified_as_session_hang():
     # 无关错误不能误伤
     assert not is_browser_session_hang_error(ValueError("some unrelated error"))
     assert not is_browser_session_hang_error(RuntimeError("wire codec mismatch"))
+
+
+@pytest.mark.asyncio
+async def test_stream_200_zero_chunks_raises_transport_error():
+    """200 + 零数据帧 = 连接被截断，必须按传输失败报错而不是静默空流。"""
+    from aistudio_api.domain.errors import BrowserTransportError
+    from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
+
+    class FakeSession:
+        async def send_streaming_request(self, **kwargs):
+            yield ("status", 200)
+            yield ("done", None)
+
+    class FakeCaptured:
+        url = "https://x/$rpc/GenerateContent"
+        body = "[]"
+        headers: ClassVar[dict] = {}
+        bypass_plan = None
+        prefill_text = ""
+
+    gateway = StreamingGateway(session=FakeSession())
+    with pytest.raises(BrowserTransportError) as exc_info:
+        async for _ in gateway.stream_chat(captured=FakeCaptured(), model="m"):
+            pass
+    assert "zero" in str(exc_info.value) or "truncated" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_nonstream_empty_200_body_raises_transport_error():
+    """非流 200 + 空 body：parse 出的空输出必须当传输失败，不许静默成功。"""
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aistudio_api.domain.errors import BrowserTransportError
+    from aistudio_api.infrastructure.gateway.client import AIStudioClient
+
+    client = AIStudioClient.__new__(AIStudioClient)  # 跳过 __init__（不碰浏览器）
+
+    class FakeSession:
+        @asynccontextmanager
+        async def request_scope(self):
+            yield
+
+        async def clear_prompt(self):
+            return None
+
+    captured = MagicMock()
+    captured.body = "[]"
+    captured.bypass_plan = None
+    captured.prefill_text = ""
+
+    client._session = FakeSession()
+    client.capture_request = AsyncMock(return_value=captured)
+    fake_replay = MagicMock()
+    fake_replay.replay = AsyncMock(return_value=(200, b""))
+    client._replay_service = fake_replay
+
+    with pytest.raises(BrowserTransportError) as exc_info:
+        await client.generate_content(model="m", capture_prompt="p")
+    assert "empty 200" in str(exc_info.value)

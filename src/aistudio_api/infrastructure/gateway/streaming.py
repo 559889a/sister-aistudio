@@ -15,7 +15,12 @@ from aistudio_api.application.bypass import (
 )
 from aistudio_api.application.prefill import StreamDeduper
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import AistudioError, RequestError, classify_error
+from aistudio_api.domain.errors import (
+    AistudioError,
+    BrowserTransportError,
+    RequestError,
+    classify_error,
+)
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.stream_parser import (
@@ -232,6 +237,12 @@ class StreamingGateway:
             # 上游原始错误体留档（截断），给偶发 403/500 的现场记录用
             exc.raw_upstream_body = raw_response[:8192]
             raise exc
+        if not raw_parts:
+            # 200 但零数据帧：连接被重置时 Chrome 可能把「只有响应头」当正常完成
+            # （2026-10-20 RST 实验实测的非流同款问题）——静默空流比报错更糟
+            raise BrowserTransportError(
+                "stream ended before any data arrived (connection truncated)"
+            )
 
         tail = deduper.flush()
         if tail:
