@@ -15,6 +15,7 @@ from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
     ChannelBypassExtractor,
+    apply_channel_sentinels,
     attach_stream_probe,
     bypass_tool_config_official,
     bypass_tools_official,
@@ -139,6 +140,9 @@ class VertexExpressClient:
         plan = None
         if contents:
             contents, system_instruction_content, plan = maybe_channel_bypass(
+                contents, system_instruction_content
+            )
+            contents, system_instruction_content = apply_channel_sentinels(
                 contents, system_instruction_content
             )
         config = self._build_config(

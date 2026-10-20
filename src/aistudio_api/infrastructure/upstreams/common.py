@@ -555,3 +555,29 @@ def finalize_stream_probe(probe: dict, exc: BaseException) -> dict:
         out["error_code"] = code
     out["error"] = str(exc)[:300]
     return out
+
+
+def apply_channel_sentinels(
+    contents: list[AistudioContent],
+    system_instruction_content: AistudioContent | None,
+) -> tuple[list[AistudioContent], AistudioContent | None]:
+    """express/cookie 通道的签名哨兵（与浏览器通道 capture.py 同一条语义）。
+
+    用户硬规则（2026-10-20）：WebUI 两个哨兵开关开着时，发往上游的**任何**
+    签名都必须是假的（skip_thought_signature_validator），不允许真签名上送。
+    """
+    from aistudio_api.application.runtime_settings import (
+        sig_sentinel_thought,
+        sig_sentinel_tool,
+    )
+    from aistudio_api.infrastructure.gateway.signatures import (
+        apply_signature_sentinels,
+    )
+
+    apply_signature_sentinels(
+        contents,
+        system_instruction=system_instruction_content,
+        thought=sig_sentinel_thought(),
+        tool=sig_sentinel_tool(),
+    )
+    return contents, system_instruction_content

@@ -98,7 +98,7 @@ def test_declaration_only_has_content_required_and_fiction_wording():
     assert parameters["required"] == ["content"]
 
     description = str(declaration["description"]).lower()
-    assert "delivery channel" in description
+    assert "shows the story text" in description
     assert "interactive-fiction" in description
     for forbidden in ("bypass", "circumvent", "safety mechanism"):
         assert forbidden not in description
@@ -125,7 +125,7 @@ def test_build_wire_tools_replaces_client_tools_with_single_synthetic_tool():
     assert len(declarations) == 1
     declaration = declarations[0]
     assert declaration[0] == "emit_x"
-    assert "delivery channel" in declaration[1].lower()
+    assert "shows the story text" in declaration[1].lower()
     schema = declaration[2]
     assert schema[0] == 6  # OBJECT
     assert schema[6] == [["content", schema[6][0][1]]]
@@ -211,7 +211,7 @@ def test_apply_bypass_returns_plan_and_injects_instruction():
     assert plan.mode == "required"
     assert plan.merge_outside is True
     injected = contents[-1].parts[-1].text
-    assert "OUTPUT PROTOCOL" in injected
+    assert "A small note about how replies are displayed" in injected
     assert plan.tool_name in injected
 
 
@@ -485,7 +485,7 @@ async def test_capture_applies_prefill_bypass_and_snapshot_after_rewrite(patch_s
     roles = [content[1] for content in body[1]]
     assert roles == ["user", "model", "user"]
     last_user_text = body[1][-1][0][0][1]
-    assert "OUTPUT PROTOCOL" in last_user_text
+    assert "A small note about how replies are displayed" in last_user_text
     assert tool_name in last_user_text
     # 预填充的 COT 守卫要求在思维链里补完并闭合
     assert "</thinking>" in last_user_text
@@ -497,7 +497,7 @@ async def test_capture_applies_prefill_bypass_and_snapshot_after_rewrite(patch_s
     # 快照必须基于改写后的 contents（binding 与 body 是同一份）
     snapshot_arg = session.generate_snapshot.call_args.args[0]
     assert any(
-        "OUTPUT PROTOCOL" in str(part.text)
+        "A small note about how replies are displayed" in str(part.text)
         for content in snapshot_arg
         for part in content.parts
     )
@@ -540,7 +540,7 @@ async def test_capture_system_position_injects_into_system_instruction(patch_set
     system_wire = body[5]
     system_texts = [str(part[1]) for part in system_wire[0]]
     assert any("sys prompt" in text for text in system_texts)
-    assert any("OUTPUT PROTOCOL" in text for text in system_texts)
+    assert any("A small note about how replies are displayed" in text for text in system_texts)
     # 调用方持有的 systemInstruction 不能被就地改掉
     assert len(system.parts) == 1
 

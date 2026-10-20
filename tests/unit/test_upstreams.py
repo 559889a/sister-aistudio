@@ -389,3 +389,32 @@ async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypat
     assert ("body", "尾巴") in tail_events
     # 合成调用不外泄为 tool_calls
     assert all(e[0] != "tool_calls" for e in events + tail_events)
+
+
+def test_channel_sentinels_full_context():
+    """用户硬规则：两个哨兵开关开着时，整份上下文（含 system）的签名全必须是假的。"""
+    from aistudio_api.application import runtime_settings as settings_module
+    from aistudio_api.infrastructure.upstreams.common import apply_channel_sentinels
+    from aistudio_api.infrastructure.gateway.signatures import SKIP_SENTINEL
+    from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
+
+    values = dict(settings_module.DEFAULTS)
+    values.update({"sigSentinelThought": True, "sigSentinelTool": True})
+    orig_get = settings_module.runtime_settings.get
+    settings_module.runtime_settings.get = lambda key, default=None: values.get(key, default)
+    try:
+        contents = [
+            AistudioContent(role="user", parts=[AistudioPart(text="hi", thought_signature="REAL_SIG_1")]),
+            AistudioContent(role="model", parts=[AistudioPart(function_call=("f", {"a": 1}), thought_signature="REAL_SIG_2")]),
+        ]
+        system = AistudioContent(role="user", parts=[AistudioPart(text="sys", thought_signature="REAL_SIG_3")])
+        apply_channel_sentinels(contents, system)
+        all_parts = [p for c in contents for p in c.parts] + system.parts
+        assert all(p.thought_signature == SKIP_SENTINEL for p in all_parts)
+        # 开关关着就不动真签名
+        values.update({"sigSentinelThought": False, "sigSentinelTool": False})
+        contents2 = [AistudioContent(role="user", parts=[AistudioPart(text="x", thought_signature="REAL_SIG_9")])]
+        apply_channel_sentinels(contents2, None)
+        assert contents2[0].parts[0].thought_signature == "REAL_SIG_9"
+    finally:
+        settings_module.runtime_settings.get = orig_get
