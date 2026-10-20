@@ -261,6 +261,42 @@
                     setTimeout(() => { try { this.abort(); } catch(e) {} }, 0);
                     return;
                 }
+                // 被动取证：Proxy RPC（Build 应用沙箱的 fetch 桥在主页面发，见
+                // 逆向相关内容/ Jn51xb.js REd/SEd）。不拦截不篡改，只记请求模板
+                // 与流式响应分帧，供 ProxyStreamedCall 重放逆向用。
+                if (
+                    url.includes('ProxyStreamedCall') &&
+                    window.__AISTUDIO__ &&
+                    window.__AISTUDIO__.proxyCapture !== 'done'
+                ) {
+                    const cap = {
+                        url: url,
+                        method: this.__aistudio_method || 'POST',
+                        headers: Object.assign({}, this.__aistudio_headers || {}),
+                        body: typeof body === 'string' ? body : '',
+                        responseChunks: []
+                    };
+                    window.__AISTUDIO__.proxyCapture = cap;
+                    let seen = 0;
+                    this.addEventListener('readystatechange', () => {
+                        try {
+                            const rt = this.responseText || '';
+                            if (rt.length > seen) {
+                                cap.responseChunks.push(rt.slice(seen));
+                                seen = rt.length;
+                            }
+                        } catch(e) {}
+                    });
+                    this.addEventListener('loadend', () => {
+                        try {
+                            cap.status = this.status;
+                            cap.responseHeaders = this.getAllResponseHeaders();
+                            cap.fullResponse = this.responseText || '';
+                            cap.done = true;
+                            window.__AISTUDIO__.proxyCapture = 'done';
+                        } catch(e) {}
+                    });
+                }
                 if (
                     window.__AISTUDIO__ &&
                     window.__AISTUDIO__.interceptBootstrap &&
