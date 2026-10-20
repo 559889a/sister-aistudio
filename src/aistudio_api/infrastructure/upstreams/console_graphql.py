@@ -95,9 +95,11 @@ def build_console_authorization(cookie_str: str) -> str:
 
 
 def _request_context(project_id: str) -> dict[str, object]:
-    # clientVersion 实测（2026-10-20）不是纯装饰：换成 20261015.09 后同 cookie/项目
-    # 立刻 Permission 'aiplatform.endpoints.predict' denied（服务端按版本路由到带
-    # predict 鉴权的路径）。20260609.06 走 Studio 网页配额路径——保持不动。
+    # clientVersion 实测（2026-10-20）不是纯装饰。晚间终局：两个版本（20260609.06 /
+    # 20261015.09）都会被 predict-denied，但 20261015.09 + 真实 experimentFlagsBinary
+    # （当晚 initArgs 的 CAMS… blob）过过一次门（429=到配额层）后复拒——服务端灰度
+    # 嫌疑。rawPredict 旁路（结构性存在）被 IAM predict 权限硬拒。保持现值等灰度
+    # 稳定，详见 逆向相关内容/console-frontend-streaming-re-2026-10-20.md 晚间补充。
     now_ms = int(time.time() * 1000)
     return {
         "clientVersion": "boq_cloud-boq-clientweb-vertexaistudio_20260609.06_p0",
