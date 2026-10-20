@@ -248,13 +248,15 @@ async def test_stream_failure_lands_probe_in_incidents(tmp_path, monkeypatch):
     from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
     contents = [AistudioContent.from_user_prompt("hi")]
-    with pytest.raises(Exception) as exc_info:
+    from aistudio_api.domain.errors import RequestError
+
+    with pytest.raises(RequestError) as exc_info:
         async for _ in client.stream_generate_content(model="m", capture_prompt="p", contents=contents):
             pass
     probe = getattr(exc_info.value, "stream_probe", None)
     assert probe and probe["channel"] == "vertex_express" and probe["error_class"]
     # 走一遍网关错误处理，确认 incidents 收到 stream_probe
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: PT011 - 任意终端错误皆可
         await svc.handle_attempt_exception(
             exc_info.value, model_path="m", normalized_model="m", client=MagicMock()
         )
