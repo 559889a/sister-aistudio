@@ -68,7 +68,7 @@ def test_account_rotator_state_persistence(tmp_path, monkeypatch):
     for _ in range(5):
         # 第 5 次 429 才打入冷宫（用户 2026-10-20 防误杀规则）
         rotator1.record_rate_limited("acc_test1", "gemini-3.8-flash")
-    rotator1.record_auth_error("acc_test2", "gemini-3.8-flash", cooldown_seconds=600.0)
+    rotator1.record_session_expired("acc_test2", "gemini-3.8-flash")
 
     assert rotator_file.is_file()
     saved = json.loads(rotator_file.read_text(encoding="utf-8"))
@@ -76,7 +76,7 @@ def test_account_rotator_state_persistence(tmp_path, monkeypatch):
     assert saved["acc_test1"]["requests"] == 6
     assert saved["acc_test1"]["rate_limited"] == 5
     assert "gemini-3.8-flash" in saved["acc_test1"]["model_rate_limited_dates"]
-    assert saved["acc_test2"]["auth_errors"] == 1
+    assert saved["acc_test2"]["session_expired"] is True
     assert saved["acc_test2"]["auth_cooldown"] > 0
 
     # Simulate restart by creating a new AccountRotator instance

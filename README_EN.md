@@ -2,7 +2,6 @@
 
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
-  <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
   <a href="https://deepwiki.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/DeepWiki-DeconstructedCube%2Faistudio--api-5B68E4?style=flat-square&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==" alt="DeepWiki"></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/Framework-FastAPI-009688?style=flat-square&logo=fastapi" alt="FastAPI"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?style=flat-square&logo=vuedotjs" alt="Vue 3"></a>
@@ -25,10 +24,7 @@
 - [Features](#features)
 - [Architecture & Documentation](#architecture--documentation)
 - [Quick Start](#quick-start)
-  - [Android (Termux)](#android-termux)
   - [Windows](#windows)
-  - [Linux / macOS](#linux--macos)
-  - [Docker Deployment](#docker-deployment)
 - [Configuration & Environment Variables](#configuration--environment-variables)
 - [API Usage Examples](#api-usage-examples)
   - [cURL](#curl)
@@ -53,9 +49,8 @@
 | **Built-in Tools** | Supports official tools such as Google Search, Google Maps, and Code Execution sandbox |
 | **Pure Python CDP** | Direct Chrome DevTools Protocol communication over asynchronous WebSockets without Node.js, Playwright, or Selenium |
 | **Web Management Console** | Built-in web dashboard for account management (supporting text and JSON bundle file imports), live request metrics, system settings (logging / API keys), and a dedicated Runtime Settings page |
-| **Android Companion App** | Native Android app (`android/`) built with Jetpack Compose, featuring isolated multi-profile management, on-demand WebView, Bitwarden autofill, and one-click bundle export |
 > [!NOTE]
-> **Memory Footprint**: The standalone Python backend consumes ~35 - 45 MB RAM. With a single controlled Chromium instance, total actual system memory (PSS) is ~350 - 450 MB on Termux proot (~250 - 350 MB on native Linux). On Android Termux, ≥ 1 GB free RAM is recommended.
+> **Memory Footprint**: The standalone Python backend consumes ~35 - 45 MB RAM; with a single controlled Chromium instance, total system memory (PSS) is ~350 - 450 MB. Windows host only.
 
 ## Architecture & Documentation
 
@@ -92,39 +87,6 @@ Technical reference documentation:
 
 ## Quick Start
 
-### Android (Termux)
-
-> [!TIP]
-> **Download Notice**: Always install Termux from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub Releases](https://github.com/termux/termux-app/releases). **Do NOT install from the Google Play Store** (the Play Store build is obsolete and will produce repository update errors).
-
-Open Termux and run the following commands step by step:
-
-```bash
-# Step 1: Update Termux environment and install git
-pkg update -y && pkg install -y git
-
-# Step 2: Clone repository and enter directory
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# Step 3: Initialize Python environment & sync dependencies (auto-resolves prebuilt Android wheels)
-bash scripts/setup-env.sh
-uv sync
-
-# Step 4: Setup managed CloakBrowser runtime (first run only, takes ~1-2 min)
-bash scripts/setup-browser.sh
-
-# Step 5: Start server
-uv run python main.py server --port 8080
-```
-
-Once started:
-1. Open your phone's browser and go to **`http://localhost:8080`** to access the Web Console;
-2. Navigate to **Accounts**, paste your Google account Cookies or import a bundle to start using the API;
-3. **Background Persistence Tip**: Pull down Android's notification bar, tap `Acquire Wakelock` on Termux's notification, and disable battery optimization for Termux in phone system settings to prevent sleep kills.
-
----
-
 ### Windows
 
 Prerequisite: [Python 3.11+](https://www.python.org/downloads/) installed (check `Add python.exe to PATH` during setup).
@@ -153,55 +115,6 @@ Open **`http://localhost:8080`** in your browser to access the Web Console.
 
 ---
 
-### Linux / macOS
-
-Open a terminal and run:
-
-```bash
-# Step 1: Install uv package manager
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Step 2: Clone repository and enter directory
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# Step 3: Sync dependencies
-uv sync
-
-# Step 4: Install CloakBrowser (first run only)
-bash scripts/setup-browser.sh
-
-# Step 5: Start server
-uv run python3 main.py server --port 8080
-```
-
-Open **`http://localhost:8080`** in your browser to access the Web Console.
-
----
-
-### Docker Deployment
-
-CloakBrowser is bundled in the container image for immediate use:
-
-```bash
-docker run -d \
-  --name aistudio-api \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
-```
-
-Or run with Docker Compose:
-
-```bash
-docker compose up -d
-```
-
-Open **`http://localhost:8080`** in your browser to access the Web Console.
-
----
-
 ## Configuration & Environment Variables
 
 Open `http://localhost:8080` in your browser to access the Web Console.
@@ -212,18 +125,17 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | `AISTUDIO_PORT` | int | `8080` | HTTP service listening port |
 | `AISTUDIO_WEB_PASSWORD` | string | `""` | Web Console access password (also checks `AISTUDIO_ADMIN_PASSWORD`) |
 | `AISTUDIO_PROXY` | string | `""` | Outbound proxy URL (`http://`, `https://`, or `socks5://`) |
-| `AISTUDIO_DATA_DIR` | string | `data/` | Main data directory for persistent files (`/app/data` in Docker) |
+| `AISTUDIO_DATA_DIR` | string | `data/` | Main data directory for persistent files |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | Directory for storing account credentials |
 | `AISTUDIO_STATS_FILE` | string | `data/stats.json` | Persistent storage file for model usage metrics |
 | `AISTUDIO_ROTATOR_STATE_FILE` | string | `data/rotator_state.json` | Persistent storage file for account 429 cooldowns and dispatch states |
 | `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | Path to model rules and default tools configuration YAML |
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | Persist request and token usage metrics across service restarts |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | Persist account 429 rate limit dates & cooldowns across restarts |
-| `AISTUDIO_BROWSER_EXECUTABLE` | string | Auto | Path to CloakBrowser executable (`/opt/cloakbrowser/chrome` in Docker) |
+| `AISTUDIO_BROWSER_EXECUTABLE` | string | Auto | Path to CloakBrowser executable |
 | `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium remote debugging port (CDP) |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | Run Chromium in headless mode |
-| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | Browser idle reclamation timeout in seconds (900s on Termux, 1800s on Desktop; 0 disables) |
-| `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Dedicated proot-distro container name for Termux |
+| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `1800` | Browser idle reclamation timeout in seconds (0 disables) |
 | `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.8-flash` | Default text model |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | Default image generation model |
 | `AISTUDIO_TIMEZONE` | string | Auto | Browser fingerprint & Wire protocol timezone (`America/Los_Angeles` by default) |
@@ -409,13 +321,6 @@ bun x pyright
 
 # Run test suite
 uv run pytest
-```
-
-Android companion app code style checks:
-
-```bash
-# Run Kotlin code style check (configured via ~/.zshrc)
-ktlint "android/app/src/main/java/**/*.kt"
 ```
 
 ---

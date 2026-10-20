@@ -167,7 +167,7 @@ def test_js_ast_syntax_with_external_runtime():
         else:
             cmd = [runtime, "-c", str(js_file)]
 
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         assert res.returncode == 0, (
             f"{runtime} syntax check failed for {js_file.name}:\n{res.stderr}"
         )
@@ -211,7 +211,7 @@ def test_evaluate_wrapper_expressions_parse_cleanly():
         prelude = "globalThis.window = globalThis; globalThis.document = { querySelector: () => null, querySelectorAll: () => [] };"
         code = f"{prelude} try {{ new Function({wrapped!r}); }} catch (e) {{ if (e instanceof SyntaxError) throw e; }}"
         cmd = [runtime, "-e", code]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         assert res.returncode == 0, (
             f"SyntaxError in evaluate() wrapper for {name}:\n{res.stderr}"
         )

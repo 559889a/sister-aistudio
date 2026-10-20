@@ -228,25 +228,6 @@ class XHRStreamTransport:
         """Return number of currently active streaming requests."""
         return len(self._queues)
 
-    def abort_stream(self, rid: str, reason: str = "stream_aborted") -> bool:
-        """Abort a specific streaming request by rid if it is active."""
-        q = self._queues.get(rid)
-        if q is not None:
-            try:
-                q.put_nowait({"type": "error", "message": reason})
-                return True
-            except asyncio.QueueFull:
-                logger.warning("Abort stream failed: queue full (rid=%s)", rid)
-                return False
-        return False
-
-    def close(self, reason: str = "transport_closed") -> None:
-        """Close transport and notify any remaining in-flight queues on process exit."""
-        for q in list(self._queues.values()):
-            with suppress(Exception):
-                q.put_nowait({"type": "error", "message": reason})
-        self._queues.clear()
-
     def _ensure_page_binding(self, page: CDPPage) -> None:
         if getattr(page, "has_stream_binding", False):
             return

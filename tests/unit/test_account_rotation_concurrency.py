@@ -222,41 +222,6 @@ async def test_rotator_sticky_mode():
 
 
 @pytest.mark.asyncio
-async def test_rotator_auth_error_failover():
-    """测试 403 鉴权异常时，立即故障转移切换至健康账号，并在后续请求中自动规避故障账号。"""
-    store = MagicMock(spec=AccountStore)
-    acc1 = AccountMeta(
-        id="acc_1", name="Account 1", email="acc1@example.com", created_at="2026-01-01"
-    )
-    acc2 = AccountMeta(
-        id="acc_2", name="Account 2", email="acc2@example.com", created_at="2026-01-01"
-    )
-    store.list_accounts.return_value = [acc1, acc2]
-
-    rotator = AccountRotator(account_store=store)
-
-    # acc1 发生 403 / The caller does not have permission
-    rotator.record_auth_error("acc_1", model="gemini-3.8-flash")
-
-    # 尝试切号：明确指定 failed_account_id=acc_1，应当秒级切换到 acc_2
-    next_acc = await rotator.get_next_account(
-        model="gemini-3.8-flash",
-        current_account_id=acc1.id,
-        failed_account_id=acc1.id,
-    )
-    assert next_acc is not None
-    assert next_acc.id == "acc_2"
-
-    # 新进请求（未指定 failed_account_id）也应该自动规避仍在 auth_cooldown 的 acc_1，直接选择 acc_2
-    new_req_acc = await rotator.get_next_account(
-        model="gemini-3.8-flash",
-        current_account_id=None,
-    )
-    assert new_req_acc is not None
-    assert new_req_acc.id == "acc_2"
-
-
-@pytest.mark.asyncio
 async def test_try_switch_account_avalanche_protection():
     """测试并发多个 429 时，_switch_lock 防止级联切号。"""
     from aistudio_api.api.state import runtime_state
@@ -564,62 +529,3 @@ async def test_ensure_authorization_header_concurrency_and_fallback():
     assert result["X-Goog-AuthUser"] == "0"
 
 
-@pytest.mark.asyncio
-async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery():
-    """并发多个协程遭遇 403 时，在位自愈仅执行 1 次，自愈后立即清除 auth_cooldown 避免连锁 403。"""
-    from aistudio_api.api.state import runtime_state
-
-    mock_rotator = MagicMock(spec=AccountRotator)
-    mock_acc_service = MagicMock()
-    mock_client = MagicMock()
-    mock_client._session = MagicMock()
-
-    acc1 = AccountMeta(
-        id="acc_1", name="Account 1", email="acc1@test.com", created_at="2026-01-01"
-    )
-    active_acc = acc1
-    mock_acc_service.get_active_account.side_effect = lambda: active_acc
-
-    stats = AccountStats(account_id="acc_1")
-    mock_rotator._stats = {"acc_1": stats}
-    mock_rotator.is_account_available.side_effect = lambda acc_id, model=None: (
-        stats.is_available(model) if acc_id == "acc_1" else False
-    )
-    mock_rotator.record_auth_error.side_effect = lambda acc_id, model=None: (
-        stats.record_auth_error(model)
-    )
-    mock_rotator.clear_cooldown.side_effect = lambda acc_id, model=None: (
-        stats.clear_cooldown(model)
-    )
-
-    activate_count = 0
-
-    async def fake_activate(acc_id, *args, **kwargs):
-        nonlocal activate_count
-        activate_count += 1
-        await asyncio.sleep(0.01)
-        return active_acc
-
-    mock_acc_service.activate_account = AsyncMock(side_effect=fake_activate)
-    mock_rotator.get_next_account = AsyncMock(return_value=acc1)
-
-    with (
-        patch.object(runtime_state, "rotator", mock_rotator),
-        patch.object(runtime_state, "account_service", mock_acc_service),
-        patch.object(runtime_state, "client", mock_client),
-    ):
-        # 3 个并发协程同时遇到 403 并尝试切号/自愈
-        tasks = [
-            try_switch_account(
-                model="gemini-3.8-flash", failed_account_id="acc_1", is_auth_error=True
-            )
-            for _ in range(3)
-        ]
-        results = await asyncio.gather(*tasks)
-
-        assert all(results)
-        # 1. 防雪崩：在位自愈只应当执行 1 次实质性的 activate_account 调用
-        assert activate_count == 1
-        # 2. 自愈成功后，必须清除账号的 auth_cooldown，使账号立即恢复健康可用，杜绝并发下后续请求直接 403
-        assert stats.is_available("gemini-3.8-flash")
-        assert stats.auth_cooldown == 0.0

@@ -25,7 +25,6 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
-      android: ${{ steps.filter.outputs.android }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -44,15 +43,13 @@ jobs:
             frontend:
               - 'web/**'
               - '.github/workflows/ci.yml'
-            android:
-              - 'android/**'
-              - '.github/workflows/ci.yml'
 
   backend-check:
     name: Backend Quality & Tests
     needs: changes
     if: ${{ needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    # 唯一受支持的平台是 Windows（2026-10-20 起；Termux/Linux/Docker 支持已移除）
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -106,67 +103,3 @@ jobs:
 
       - name: Verify Web Production Build
         run: bun run build
-
-  android-lint:
-    name: Android Static Analysis (Lint & ktlint)
-    needs: changes
-    if: ${{ needs.changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Run ktlint Check
-        run: ./gradlew :app:ktlintCheck
-
-      - name: Run Android Lint
-        run: ./gradlew :app:lintDebug
-
-  android-build:
-    name: Android APK Build
-    needs: [changes, android-lint]
-    if: ${{ needs.changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Build Release APK
-        run: ./gradlew :app:assembleRelease
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: aistudio-extractor-apk
-          path: android/app/build/outputs/apk/release/*.apk
-          retention-days: 7

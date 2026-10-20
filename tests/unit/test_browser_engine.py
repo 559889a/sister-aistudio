@@ -14,7 +14,6 @@ from aistudio_api.infrastructure.browser.browser_engine import (
     _create_windows_job_object,
     _derive_stable_fingerprint_seed,
     _is_active_api_server,
-    _spawn_process_watchdog,
     build_chromium_args,
     cleanup_stale_chromium,
     find_chromium_executable,
@@ -63,7 +62,7 @@ def test_find_chromium_executable_strictly_requires_cloakbrowser(tmp_path):
     fake_cloak_dir.mkdir(parents=True)
     bin_name = "chrome.exe" if platform.system() == "Windows" else "chrome"
     fake_bin = fake_cloak_dir / bin_name
-    fake_bin.write_text("fake binary")
+    fake_bin.write_text("fake binary", encoding="utf-8")
     if platform.system() != "Windows":
         fake_bin.chmod(0o755)
 
@@ -85,57 +84,20 @@ def test_find_chromium_executable_strictly_requires_cloakbrowser(tmp_path):
 
     # 2. When CloakBrowser directories do not exist, strictly raises FileNotFoundError
     with (
-        patch("pathlib.Path.is_dir", return_value=False),
+        patch.object(Path, "is_dir", return_value=False),
         patch("aistudio_api.config.settings.browser_executable_path", None),
-        patch(
-            "aistudio_api.infrastructure.browser.browser_engine._is_termux",
-            return_value=False,
-        ),
         pytest.raises(FileNotFoundError, match="未检测到 CloakBrowser"),
     ):
         find_chromium_executable()
 
     # 3. When explicit CloakBrowser executable path is provided, returns it
     fake_chrome = tmp_path / "chrome.exe"
-    fake_chrome.write_text("fake cloakbrowser")
+    fake_chrome.write_text("fake cloakbrowser", encoding="utf-8")
     with patch(
         "aistudio_api.config.settings.browser_executable_path", str(fake_chrome)
     ):
         found = find_chromium_executable()
         assert found == str(fake_chrome)
-
-    # 4. When CloakBrowser is installed in /opt/cloakbrowser (e.g. Docker container)
-    fake_opt_chrome = tmp_path / "opt_cloak" / "chrome"
-    fake_opt_chrome.parent.mkdir(parents=True)
-    fake_opt_chrome.write_text("fake docker cloakbrowser")
-    if platform.system() != "Windows":
-        fake_opt_chrome.chmod(0o755)
-
-    orig_glob = Path.glob
-
-    def fake_opt_is_dir(self):
-        if self.name == ".cloakbrowser":
-            return False
-        if str(self) == "/opt/cloakbrowser":
-            return True
-        return orig_is_dir(self)
-
-    def fake_opt_glob(self, pat):
-        if str(self) == "/opt/cloakbrowser":
-            return [fake_opt_chrome]
-        return orig_glob(self, pat)
-
-    with (
-        patch.object(Path, "is_dir", fake_opt_is_dir),
-        patch.object(Path, "glob", fake_opt_glob),
-        patch("aistudio_api.config.settings.browser_executable_path", None),
-        patch(
-            "aistudio_api.infrastructure.browser.browser_engine._is_termux",
-            return_value=False,
-        ),
-    ):
-        found = find_chromium_executable()
-        assert found == str(fake_opt_chrome)
 
 
 def test_build_chromium_args_low_memory_optimizations():
@@ -166,21 +128,6 @@ def test_cleanup_stale_chromium_skips_active_api_server():
         assert isinstance(killed, list)
 
 
-def test_spawn_process_watchdog_creates_pipe_and_reaps():
-    """Verify process watchdog companion spawns with pipe and cleans up."""
-    import subprocess
-
-    dummy = subprocess.Popen(["true"])
-    dummy.wait()
-
-    watcher, pipe_w = _spawn_process_watchdog(dummy.pid, target_pgid=None)
-    if watcher is not None:
-        assert pipe_w is not None
-        os.close(pipe_w)
-        watcher.wait(timeout=2.0)
-        assert watcher.poll() is not None
-
-
 def test_build_chromium_args_platform_and_timezone():
     """Verify stealth platform spoofing and timezone override flags."""
     args = build_chromium_args(
@@ -191,26 +138,18 @@ def test_build_chromium_args_platform_and_timezone():
     args_str = " ".join(args)
     assert "--fingerprint-timezone=America/New_York" in args_str
     assert "--fingerprint-locale=en-US" in args_str
-    # On non-Darwin hosts, platform defaults to windows
-    import platform
-
-    if platform.system() != "Darwin":
-        assert "--fingerprint-platform=windows" in args_str
-    else:
-        assert "--fingerprint-platform=macos" in args_str
+    # 统一伪装 Windows 桌面指纹（Termux/Linux/Docker/macOS 支持已移除）
+    assert "--fingerprint-platform=windows" in args_str
 
 
 def test_windows_job_object_lifecycle():
     """Verify Windows Job Object auto-terminates child process on handle close."""
-    import platform
-    import subprocess
-    import time
-
     if platform.system() != "Windows":
         assert _create_windows_job_object() is None
         return
 
-    import ctypes
+    import subprocess
+    import time
 
     job = _create_windows_job_object()
     assert job is not None
@@ -221,6 +160,8 @@ def test_windows_job_object_lifecycle():
         assert assigned is True
         assert proc.poll() is None
     finally:
+        import ctypes
+
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is not None:
             kernel32 = win_dll("kernel32", use_last_error=True)

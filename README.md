@@ -2,7 +2,6 @@
 
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
-  <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
   <a href="https://deepwiki.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/DeepWiki-DeconstructedCube%2Faistudio--api-5B68E4?style=flat-square&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==" alt="DeepWiki"></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/Framework-FastAPI-009688?style=flat-square&logo=fastapi" alt="FastAPI"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?style=flat-square&logo=vuedotjs" alt="Vue 3"></a>
@@ -25,10 +24,7 @@
 - [核心特性](#核心特性)
 - [技术架构与文档](#技术架构与文档)
 - [快速开始](#快速开始)
-  - [Android (Termux)](#android-termux)
   - [Windows](#windows)
-  - [Linux / macOS](#linux--macos)
-  - [Docker 部署](#docker-部署)
 - [配置与环境变量](#配置与环境变量)
 - [API 调用示例](#api-调用示例)
   - [cURL 调用](#curl-调用)
@@ -59,9 +55,8 @@
 | **流式可靠性与心跳** | 没有「单次生成最长等待 / 流式空闲」看门狗，长回答不会被网关掐断；流式响应从请求开始每 1 秒发一次 SSE 心跳（OpenAI 空 delta chunk / Gemini 原生 `: ping` 注释行），bypass 首块前的长静默也不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文；页面 fetch 网络失败（如 `Failed to fetch`）后台重启该浏览器并明确报 502（不自动重试） |
 | **签名哨兵** | 发往上游的思考签名 / 工具签名默认换成官方逃生口 `skip_thought_signature_validator`，避免上游「校验后替换内容」导致的死循环 |
 | **Web 管理面板** | 提供 Web 管理控制台，支持账号管理（文本与 JSON 批量导入）、调用量监控、系统配置（日志 / API Key），以及独立的「运行期设置」页 |
-| **Android 伴侣端** | 配套 Android 原生应用（`android/`），采用 Jetpack Compose 构建，支持多 Profile 隔离登录、Bitwarden 自动填充与一键导出凭据包 |
 > [!NOTE]
-> **内存占用参考**：纯 Python 后端服务常驻内存约 35 - 45 MB；拉起单实例受控 Chromium 后总物理内存 (PSS) 约 350 - 450 MB（宿主 Linux 下约 250 - 350 MB）。Android Termux 环境建议空闲 RAM ≥ 1 GB。
+> **内存占用参考**：纯 Python 后端服务常驻内存约 35 - 45 MB；拉起单实例受控 Chromium 后总物理内存 (PSS) 约 350 - 450 MB。仅支持 Windows 宿主。
 
 ## 技术架构与文档
 
@@ -98,39 +93,6 @@
 
 ## 快速开始
 
-### Android (Termux)
-
-> [!TIP]
-> **下载提示**：请务必从 [F-Droid](https://f-droid.org/packages/com.termux/) 或 [GitHub Releases](https://github.com/termux/termux-app/releases) 安装 Termux。**切勿使用 Google Play 商店版本**（Play 商店版本已停止维护，更新环境会报错）。
-
-打开 Termux，依次复制执行以下命令：
-
-```bash
-# 步骤 1：更新 Termux 基础环境并安装 git
-pkg update -y && pkg install -y git
-
-# 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 步骤 3：初始化依赖环境（自动配置手机专属加速源，无需本地编译）
-bash scripts/setup-env.sh
-uv sync
-
-# 步骤 4：安装并配置受控浏览器（仅首次需要，耗时约 1~2 分钟）
-bash scripts/setup-browser.sh
-
-# 步骤 5：启动服务
-uv run python main.py server --port 8080
-```
-
-启动成功后：
-1. 打开手机自带浏览器，访问 **`http://localhost:8080`** 即可进入 Web 管理控制台；
-2. 点击 **“账号管理”** 页面，粘贴你的 Google 账号 Cookie 或导入凭据包即可开始调用；
-3. **后台保活提示**：下拉手机通知栏，点击 Termux 通知项上的 `Acquire Wakelock`，并在手机系统设置中为 Termux 开启“无限制后台运行/电池优化白名单”，防止锁屏休眠被系统误杀。
-
----
-
 ### Windows
 
 前置要求：电脑已安装 [Python 3.11+](https://www.python.org/downloads/)（安装时勾选 `Add python.exe to PATH`）。
@@ -159,33 +121,7 @@ uv run python main.py server --port 8080
 
 ---
 
-### Linux / macOS
-
-打开终端，依次执行：
-
-```bash
-# 步骤 1：安装 uv 包管理工具
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 步骤 3：同步安装项目依赖
-uv sync
-
-# 步骤 4：安装 CloakBrowser 浏览器（仅首次需要）
-bash scripts/setup-browser.sh
-
-# 步骤 5：启动服务
-uv run python3 main.py server --port 8080
-```
-
-服务启动后，浏览器访问 **`http://localhost:8080`** 进入管理控制台。
-
----
-
-### 一键启动（start.cmd / start.sh）
+### 一键启动（start.cmd）
 
 **Windows**：运行仓库根目录的 `start.cmd`，服务直接在当前终端**前台**跑，日志实时打在屏幕上；按 `Ctrl+C` 就停（cmd 若追问 `Terminate batch job (Y/N)?` 按 `Y`）。
 
@@ -200,42 +136,10 @@ set AISTUDIO_BROWSER_HEADLESS=false && start.cmd   # 有头浏览器
 日志只保留 LLM 请求 / 上游重试 / 错误（健康检查、面板轮询、uvicorn access 日志不再刷屏）；
 要看更细的转换细节，把 `config.yaml` 的 `logging.level` 改成 `DEBUG`。
 
-**Linux / macOS / Termux / Windows Git Bash**：`start.sh` 做同样的事（前台运行，Ctrl+C 停）：
-
-```bash
-./start.sh                      # 默认 8080 端口，无头模式
-PORT=8081 ./start.sh            # 换端口
-AISTUDIO_BROWSER_HEADLESS=false ./start.sh   # 有头启动（本机调试用）
-VENV=/path/to/existing/venv ./start.sh       # 复用已有虚拟环境
-```
-
-两个脚本的行为一致：优先用已有 `.venv` / `venv`（`VENV` 可指定）；没有就用 `uv`
+优先用已有 `.venv` / `venv`（`VENV` 可指定）；没有就用 `uv`
 建环境（没有 uv 则 `python -m venv`）；依赖装过一次（能 import fastapi）就跳过。
 浏览器仍需事先准备好（`scripts/setup-browser.sh` / `scripts/install-browser.ps1`，
 或设置 `AISTUDIO_BROWSER_EXECUTABLE`）。
-
----
-
-### Docker 部署
-
-镜像已内置 CloakBrowser 运行时，支持开箱即用：
-
-```bash
-docker run -d \
-  --name aistudio-api \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
-```
-
-使用 Docker Compose 启动：
-
-```bash
-docker compose up -d
-```
-
-启动后访问 **`http://localhost:8080`**（或服务器 IP 端口）进入管理控制台。
 
 ---
 
@@ -251,18 +155,17 @@ docker compose up -d
 | `AISTUDIO_HOST` | string | `0.0.0.0` | 监听地址。默认对局域网/其它设备开放；只允许本机访问就设 `127.0.0.1` |
 | `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`） |
 | `AISTUDIO_PROXY` | string | `""` | 出口代理地址，支持 `http://`、`https://` 或 `socks5://` |
-| `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录（Docker 下为 `/app/data`） |
+| `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录 |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | 账号持久化凭据目录 |
 | `AISTUDIO_STATS_FILE` | string | `data/stats.json` | 模型调用与 Token 使用量统计持久化文件 |
 | `AISTUDIO_ROTATOR_STATE_FILE` | string | `data/rotator_state.json` | 账号调度与 429 冷却状态持久化文件 |
 | `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | 模型规则与默认工具配置文件路径 |
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化模型调用与 Token 统计（1=开启，0=关闭） |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号 429 冷却与调度状态（1=开启，0=关闭） |
-| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径（Docker 内为 `/opt/cloakbrowser/chrome`） |
+| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径 |
 | `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP)，单浏览器独占 |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否以无头模式运行 Chromium |
-| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | 浏览器空闲自动回收超时秒数（Termux 下默认 900s，桌面端 1800s，0 为禁用） |
-| `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Termux 环境下专用的 proot-distro 容器名称 |
+| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `1800` | 浏览器空闲自动回收超时秒数（0 为禁用） |
 | `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.8-flash` | 默认文本模型 |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | 默认图像生成模型 |
 | `AISTUDIO_TIMEZONE` | string | 自动探测 | 受控浏览器指纹与 Wire 协议交互时区（默认 `America/Los_Angeles`） |
@@ -531,17 +434,10 @@ uv run pytest
 ```
 
 > [!NOTE]
-> Windows 本地基线是 **567 passed / 7 failed**（7 条都是环境类既有失败，CI Linux 上不存在，
-> 明细见 `AGENT.md` §3.4）。交接状态、未解决问题、真机证据与诊断脚本见 **`AGENT.md` §6**；
+> 全量测试本地基线 **533 passed / 0 failed**（此前的 7 条 Windows「环境失败」实为缺 encoding
+> 的真 bug，已修复；明细见 `AGENT.md` §3.4）。交接状态、未解决问题、真机证据与诊断脚本见 **`AGENT.md` §6**；
 > 项目里只有一个目录 `C:\sister-aistudio`，测试用项目 `.venv`（`pytest`/`ruff` 已装）；
 > 改完代码记得重启服务才生效。
-
-Android 伴侣端代码质量检查：
-
-```bash
-# 执行 Kotlin 代码规范检查 (已配置于 ~/.zshrc)
-ktlint "android/app/src/main/java/**/*.kt"
-```
 
 ---
 

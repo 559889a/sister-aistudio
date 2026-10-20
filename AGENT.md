@@ -7,7 +7,7 @@
 ## 目录
 
 - [1. 核心架构与设计原则](#1-核心架构与设计原则)
-- [2. 运行时与环境约束 (Termux)](#2-运行时与环境约束-termux)
+- [2. 运行时与环境约束（仅 Windows）](#2-运行时与环境约束仅-windows)
 - [3. 代码质量与类型规范](#3-代码质量与类型规范)
 - [4. 并发安全与多账号守则](#4-并发安全与多账号守则)
 - [5. 代码结构索引](#5-代码结构索引)
@@ -36,31 +36,29 @@
 - **架构事实优先（Fact & Architecture over Brittle Tests）**：保持架构整洁与低耦合。避免为了迁就耦合了私有变量的脆弱 mock 测试而妥协生产设计；遇冲突时应重构测试以对齐公共接口契约，消除抽象泄露。
 - **协议索引常量化（Specification Constants & No Magic Numbers）**：Protobuf-over-JSON 逆向数组索引统一提取为具备明确语义的规范枚举或常量（如 `wire_spec.py`），杜绝裸数字散落业务逻辑中。
 
-## 2. 运行时与环境约束 (Termux)
+## 2. 运行时与环境约束（仅 Windows）
 
-Python 工具链运行在 Termux 宿主（通过 `uv` 管理虚拟环境）；Chromium（CloakBrowser）由于 glibc/bionic ABI 差异，运行在 `proot-distro` Linux 容器中。CDP 通过内置的 `cdp_client.py` 经由 WebSocket 直连。
+**唯一受支持的平台是 Windows 宿主**（2026-10-20 用户拍板；Termux/Linux/Docker/
+macOS 支持与 Android 伴侣端已整体移除，别加回来）。Python 工具链用 `uv` 管虚拟环境，
+Chromium（CloakBrowser）由 `browser_engine.py` 直接子进程拉起（Job Object 看护），
+CDP 经 `cdp_client.py` WebSocket 直连。
 
 ### 2.1 环境准备与启动流程
 
-```bash
-# 1. 宿主依赖环境配置与同步
-bash scripts/setup-env.sh
+```powershell
+# 1. 安装 uv 并同步依赖
 uv sync
 
 # 2. 准备受控浏览器运行时（仅首次执行）
-bash scripts/setup-browser.sh
+scripts\install-browser.bat
 
-# 3. 启动服务
-uv run python3 main.py server --port 8080
+# 3. 启动服务（前台运行，Ctrl+C 即停；或直接用 start.cmd）
+uv run python main.py server --port 8080
 ```
 
 > [!NOTE]
-> - Windows 下用仓库根目录的 `start.cmd`：前台运行（选/建 venv → 装依赖 → 起服务），日志直接打在终端，**Ctrl+C 即停**；`start.sh` 保留给 Linux / macOS / Termux / Git Bash。两者行为一致。
+> - `start.cmd`：前台运行（选/建 venv → 装依赖 → 起服务），日志直接打在终端，**Ctrl+C 即停**。
 > - 终端日志只保留 LLM 请求/上游重试/错误（健康检查、面板轮询、uvicorn access、httpx 逐请求都静音）；日志格式是 `[INFO] 2026-10-19T10:54:15.499Z [aistudio-api] …`，请求带短 id（`→` / `← 完成` / `请求失败` / `客户端断开`）。要协议细节把 `logging.level` 设 DEBUG。
-
-> [!NOTE]
-> - `uv` 会解析 `uv.lock` 中的跨平台镜像索引与预编译 wheel，避免在 Termux 环境因编译 Rust 消耗过多内存导致 OOM。
-> - `scripts/cloakbrowser_termux/run-chrome.sh` 是 Termux 下的 Chromium 包装入口，内部调用 `proot-distro login aistudio-api -- /opt/cloakbrowser/chrome "$@"` 并自动绑定路径。
 
 ### 2.2 前端构建与管理
 
@@ -68,26 +66,18 @@ uv run python3 main.py server --port 8080
 - 依赖管理与构建使用 `bun`（`bun run dev`、`bun run build`、`bun run lint`、`bun run type-check`）。
 - 生产构建产物直接输出至 `src/aistudio_api/static/`，由 FastAPI 静态托管。
 
-### 2.3 Android 伴侣端 (android/)
-
-- 源码位于 `android/` 目录，基于 Jetpack Compose + Material 3 构建，用于移动端多账号 Cookie 提取。
-- 包含多 Profile 隔离、按需启动 WebView（不常驻内存）以及 Bitwarden 自动填充适配。
-- 代码规范检查使用 `ktlint`，规则配置于 `android/.editorconfig`。
-- 检查命令：`ktlint "android/app/src/main/java/**/*.kt"`。
-
-### 2.4 常见排错
+### 2.3 常见排错
 
 | 现象 | 原因 | 处理方案 |
 |---|---|---|
-| `[Errno 98] address already in use` | 端口被占用或上一次服务未完全退出 | 执行 `pkill -f 'main.py server'` 后重试，或指定 `--port <other_port>` |
-| `Chromium CDP endpoint on port N not ready` | proot 容器未启动或缺少 apt 依赖 | 重新运行 `bash scripts/setup-browser.sh` |
-| `proot-distro login: container 'aistudio-api' is missing` | 容器尚未创建或被改名 | 运行安装脚本创建容器，或通过 `AISTUDIO_PROOT_NAME` 指定现有容器 |
-| `pydantic-core` 报 `GLIBC_X.Y not found` | 使用了系统 pip 安装而非 `uv` | 清理 `.venv/` 后重新执行 `uv sync` |
+| 端口被占用 | 上一次服务未完全退出 | 关掉旧 `start.cmd` 窗口（Ctrl+C）后重试，或指定 `--port <other_port>` |
+| `Chromium CDP endpoint on port N not ready` | CloakBrowser 未安装或路径不对 | 重新运行 `scripts\install-browser.bat`，或设 `AISTUDIO_BROWSER_EXECUTABLE` |
+| `pydantic-core` 导入失败 | 使用了系统 pip 安装而非 `uv` | 清理 `.venv/` 后重新执行 `uv sync` |
 
-### 2.5 临时文件与目录规范 (Termux)
+### 2.4 临时文件与目录规范
 
-- **避免硬编码 `/tmp`**：Android Termux 环境中不存在系统级 `/tmp` 目录。在代码、测试、脚本或临时分析中严禁硬编码 `/tmp/`，否则会引发 `FileNotFoundError: [Errno 2] No such file or directory: '/tmp'`。
-- **统一使用 `tempfile` / `$TMPDIR`**：所有临时目录或文件操作必须通过 `tempfile.gettempdir()` 或 `tempfile.mkdtemp()` 创建（自动安全解析至 `$TMPDIR` 即 `/data/data/com.termux/files/usr/tmp`），并在操作完成后通过 `try...finally` 与 `shutil.rmtree` 及时清理。
+- **避免硬编码 `/tmp`**：跨平台惯例，统一用 `tempfile.gettempdir()` / `tempfile.mkdtemp()`
+  创建临时目录（Windows 下解析到 `%TEMP%`），并在 `try...finally` + `shutil.rmtree` 及时清理。
 ---
 
 ## 3. 代码质量与类型规范
@@ -178,11 +168,11 @@ uv run python3 main.py server --port 8080
 | **前端代码规范** | `cd web && bun run lint` | 0 errors, 0 warnings |
 | **前端类型检查** | `cd web && bun run type-check` | 0 errors |
 | **前端生产构建** | `cd web && bun run build` | 构建成功并更新 static 产物 |
-| **Android 静态检查 (Lint & 代码规范)** | `cd android && ./gradlew :app:lintDebug :app:ktlintCheck` 或 `ktlint "android/app/src/main/java/**/*.kt"` | 0 errors |
 > [!NOTE]
 > **跨平台原生二进制依赖与开发工具**：
-> - `pydantic-core` 等依赖在 PyPI 上无预编译 Android wheel，而 Termux 的 TUR 源无桌面端 wheel。因此 `uv.lock` 纳入 `.gitignore`：桌面端直接从 PyPI 安装对应 wheel；Termux 端通过 `setup-env.sh` 生成本地 `uv.toml` 使用 TUR 源，避免不同平台的 wheel 源锁定冲突，各平台均直接使用二进制 wheel 避免源码编译。
-> - `ruff` 作为开发阶段的 Lint 工具，在 `pyproject.toml` 的 dev 依赖中配置了平台标记 `ruff>=0.8.0; sys_platform != 'android'`；桌面平台（Linux / macOS / Windows）执行 `uv sync --extra dev` 时直接自 PyPI 下载预编译 wheel。而在 Android Termux 环境下，TUR 并未打包 ruff 的 PyPI wheel，开发者可通过 Termux 原生包管理器 `pkg install -y ruff` 直接获得编译好的 aarch64 native 二进制，`setup-env.sh` / `setup-browser.sh` 会自动建立 `.venv/bin/ruff` 软链以便在虚拟环境中直接调用，普通用户生产运行无需安装。
+> Windows-only 后这条只剩历史价值：`uv.lock` 仍在 `.gitignore`（无跨平台 wheel 源冲突需要锁定了，
+> 想锁定也可以移回来）；`ruff` 在 dev 依赖里的 `sys_platform != 'android'` 平台标记已无意义，
+> 后续清理 `pyproject.toml` 时可一并去掉。
 
 > [!TIP]
 > **避免无效重跑**：若在当前交互轮次中未发生代码或配置文件的实质性变动，无需重复执行全量类型与测试套件检查。
@@ -196,7 +186,7 @@ uv run python3 main.py server --port 8080
 4. **鉴权/服务端/传输故障：一律「记账 + 重启浏览器 + 真实错误返回」（零重试，别再退回去）**：403/401、页面 fetch/XHR 传输失败、会话挂死**都不是账号问题**——不写 `auth_cooldown`（不要调 `record_auth_error`），按浏览器故障处理：清模板 + 杀掉浏览器进程（下次请求 `ensure_ready` 重建）；本次请求按真实状态码返回（传输失败 502）。只有 429 驱动换号（第 5 次才冷却，见 §1）；只有 `SessionExpiredError`（真的被跳到登录页）按账号隔离 24h。
 5. **无全局 DOM 污染**：页面内 JavaScript 交互使用局部闭包 `Promise` 返回数据，不在 `window` 对象上遗留全局共享状态。
 6. **Cookie 智能精简与天然协商**：外部导入 Cookie 时自动过滤旧设备或跨 IP 绑定的易腐败凭据（`OSID`、`__Secure-OSID`、`SIDCC` 及 `_ga` 等追踪标记），保留核心认证项（`SID`、`SAPISID`、`1PSIDTS`）。浏览器访问 AI Studio 时自动协商出绑定当前网络/TLS 的全新有效 `OSID`，杜绝 403 权限拒绝。
-7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制以保障 Android 低 RAM 运行；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
+7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制控制内存占用；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
 8. **账号接口解耦与 SPA 缓存隔离**：对外标准 REST 接口统一位于 `/api/accounts`（保持 `/accounts` 向下兼容），并在 SPA 单页应用与 API 响应中下发 `Vary: Accept` 与 `Cache-Control: no-store`，杜绝浏览器与代理网关发生缓存错乱。
 
 ## 5. 代码结构索引
@@ -212,15 +202,6 @@ aistudio-api/
 │   │   ├── views/                 # 页面路由视图 (Dashboard, Accounts, Settings, Login)
 │   │   └── router/                # Vue Router 路由与守卫
 │   └── vite.config.ts             # 构建配置 (输出至 src/aistudio_api/static)
-├── android/                       # Android 伴侣端：多资料凭据提取器 (Jetpack Compose + Material 3)
-│   ├── app/src/main/
-│   │   ├── AndroidManifest.xml    # 声明 BROWSABLE / http / https 意图，适配 Bitwarden
-│   │   └── java/com/aistudio/extractor/
-│   │       ├── MainActivity.kt    # 单 Activity、SAF 导出/备份导入
-│   │       ├── data/              # ProfileItem / AccountBundle / ProfileManager
-│   │       └── ui/                # Material 3 主题、MainScreen、按需挂载的 LoginScreen
-│   ├── build.gradle.kts           # 根构建脚本
-│   └── .editorconfig              # ktlint 代码规范配置
 ├── src/aistudio_api/
 │   ├── api/                       # HTTP 接口层 (FastAPI)
 │   │   ├── app.py                 # 应用生命周期与静态托管
@@ -289,6 +270,8 @@ aistudio-api/
 | **（第四轮，2026-10-20）网关零自动重试**：用户拍板移除全部当次请求重试（切备用 worker / 单浏览器原地重试 / 切号重试 / 204 与 Ambiguous 404 抖动重试、`MAX_RETRIES`、备用判定 `_standby_worker`）；自愈仅剩「特定故障后台重启浏览器」（403/401、5xx、传输失败、会话挂死、登录页重定向），429 只记账不重启 | `application/api_service_gemini.py`、`infrastructure/gateway/client_pool.py`、`application/account_orchestrator.py` + 5 个测试文件 | 全量 **563 passed / 7 failed**（7 条全是 §6.3.7 环境类既有失败）；ruff 0 errors；pyright 86 = 基线持平 0 新增 |
 | **（第五轮，2026-10-20）单浏览器 + 429 冷宫规则 + 一手证据修 bug**：① 移除多浏览器 worker 池（`client_pool.py` / `AISTUDIO_BROWSER_POOL_SIZE` / `clamp_pool_size` / 池分支路由全删），账号池保留（蓝绿热切）；② 只有 429 换号，`RATE_LIMITED_COOLDOWN_THRESHOLD=5`（第 5 次 429 才冷却到午夜，成功清零计数；drip 模式删除）；③ 常驻逆向 agent 一手复核（`逆向相关内容/independent-re-2026-10-20.md`）修了 3 个真 bug：seed 槽位（genConfig idx18，此前两端口都静默丢 seed）、finishReason 5/6 互换与 15/16/17 错位 + 补 18=MISSING_THOUGHT_SIGNATURE、idx11 语义更正（会话 token `v1_…`，非 cachedContent）；④ 硬编码 `gemini-3.7-flash` → `gemini-3.8-flash`；⑤ 流式预填充泄漏修复（非 200 不吐 prefill） | `app.py`、`routes_accounts.py`、`account_rotator.py`、`wire_spec/types/codec`、`schemas.py`、`chat_service.py`、`openai_bridge.py`、`streaming.py`、web 前端 | 全量 **533 passed / 7 failed**（基线不变）；ruff 0；pyright 78（比基线 86 少 8，0 新增）；web lint/type-check/build 全过 |
 | 文档：binding 新构建、bypass 整段返回、池 standby 语义 | `README.md`、`AGENT.md`、`docs/BOTGUARD_VERIFICATION_CHAIN.md` | — |
+| **（第六轮，2026-10-20）Windows-only 裁剪 + 全量 review 收尾**：① 移除 Termux/Linux/Docker/macOS/android（`Dockerfile`、compose×2、`scripts/cloakbrowser_termux|setup-*.sh`、`start.sh`、`android/`、docker workflow；CI backend 切 `windows-latest`）；② `browser_engine.py` 砍掉 proot/Darwin/POSIX 看门狗（~200 行）；③ 修 7 条「环境失败」真 bug——测试读 fixture/子进程输出没写 `encoding="utf-8"`（GBK 崩），全量 **533 passed / 0 failed**；④ 孤儿清理：`abort_stream`、`transport.close`、`is_transient_rpc_error`、`auth_error` 写入链（`record_auth_error`/`try_switch_account` 的 `is_auth_error`/`is_session_expired` 参数、`get_next_account` 同名参数）；⑤ 继续全量 review（botguard_bootstrap/replay/session_state/signatures/stream_parser/wire_parser/transport/capture/streaming 已审，未发现新 bug） | 全仓多处 | 533/0；ruff 0；pyright 78 持平 |
+
 
 上一轮（同一会话）已完成、已被第五轮部分取代：~~2 台 worker 池~~（已移除）、
 403/401/5xx/502/transport 按 worker 故障重启（现为单浏览器杀进程）、429 保留配额冷却

@@ -176,7 +176,7 @@ def discover_proxy_url() -> str | None:
     )
     if env_proxy:
         return env_proxy
-    # 尝试自动探测本地代理（如 Termux 下的 Clash / v2ray）
+    # 尝试自动探测本地代理（如本机跑着的 Clash / v2ray）
     import socket
 
     for port in (7890, 10808):
@@ -240,12 +240,6 @@ def _resolve_default_idle_timeout() -> int:
     env_val = os.getenv("AISTUDIO_BROWSER_IDLE_TIMEOUT")
     if env_val is not None and env_val.strip() != "":
         return int(env_val)
-    if (
-        "com.termux" in os.getenv("PREFIX", "")
-        or "com.termux" in os.getenv("PATH", "")
-        or os.getenv("ANDROID_ROOT") is not None
-    ):
-        return 900
     return 1800
 
 

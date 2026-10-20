@@ -30,16 +30,18 @@ def _get_switch_lock() -> asyncio.Lock:
 async def try_switch_account(
     model: str | None = None,
     failed_account_id: str | None = None,
-    *,
-    is_auth_error: bool = False,
-    is_session_expired: bool = False,
 ) -> bool:
-    """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
+    """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。
+
+    调用方只有 ``ensure_active_account``（请求前置调度）：当前账号因 429 冷宫或
+    登录态失效不可用时挑一个健康的。失败标记（429/SessionExpired）由
+    ``handle_attempt_exception`` 直接记账，这里不再重复记录。
+    """
     global _last_switch_time
     entry_time = time.time()
 
-    # 乐观快速预检：若无需记录永久失效/短时隔离，且当前活跃账号已被并发请求切换至健康状态，直接免锁复用
-    if failed_account_id and not is_session_expired and not is_auth_error:
+    # 乐观快速预检：当前活跃账号已被并发请求切换至健康状态时，直接免锁复用
+    if failed_account_id:
         rotator = runtime_state.rotator
         account_service = runtime_state.account_service
         if rotator is not None and account_service is not None:
@@ -70,25 +72,18 @@ async def try_switch_account(
         current_active = account_service.get_active_account()
         current_id = current_active.id if current_active else None
 
-        # 双重检查 1：如果已有并发协程在 entry_time 之后完成切号或在位自愈刷新，且当前账号对该模型可用，则直接复用
+        # 双重检查 1：如果已有并发协程在 entry_time 之后完成切号，且当前账号对该模型可用，则直接复用
         if (
             _last_switch_time >= entry_time
             and current_id
-            and (not is_session_expired or current_id != failed_account_id)
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
-                "已有并发请求完成切号或会话自愈，直接复用当前健康账号: %s (model=%s)",
+                "已有并发请求完成切号，直接复用当前健康账号: %s (model=%s)",
                 current_id,
                 model,
             )
             return True
-
-        # 遇到登录态失效时，永久禁用该账号并拒绝原地重试
-        if failed_account_id and is_session_expired:
-            rotator.record_session_expired(failed_account_id, model=model)
-        elif failed_account_id and is_auth_error:
-            rotator.record_auth_error(failed_account_id, model=model)
 
         # 双重检查 2：如果已经由并发协程切换到了新账号，且新账号对当前 model 可用，则直接复用
         if (
@@ -108,14 +103,8 @@ async def try_switch_account(
             model=model,
             current_account_id=current_id,
             failed_account_id=failed_account_id,
-            is_session_expired=is_session_expired,
         )
         if next_account is None:
-            if is_session_expired:
-                logger.error(
-                    "账号 %s 登录态失效且无其他可用备用账号，禁止原地重试",
-                    failed_account_id,
-                )
             return False
 
         if current_id is None or next_account.id != current_id:
@@ -127,14 +116,9 @@ async def try_switch_account(
                 rotator.clear_cooldown(next_account.id, model=model)
                 _last_switch_time = time.time()
             return result is not None
-        # 登录态失效严禁在原账号原地重试
-        if is_session_expired and (
-            failed_account_id == current_id or next_account.id == failed_account_id
-        ):
-            logger.error("账号 %s 登录态已失效，禁止在原账号重试", failed_account_id)
-            return False
 
-        # 单账号模式或所有其他账号均不可用时（非登录态失效，如偶发 403 鉴权波动），如果指定了 failed_account_id，强制刷新当前会话与 BotGuard
+        # 单账号模式：当前账号就是唯一候选（429 冷宫到期/手动清零后走到这），
+        # 刷新会话与 BotGuard 让下一个请求拿到干净页面
         if failed_account_id and failed_account_id == current_id:
             logger.info(
                 "无其他可用备用账号，重新刷新当前账号会话与 BotGuard: %s",
@@ -196,8 +180,6 @@ def record_rotator_event(
         rotator.record_success(account.id, model=model)
     elif event == "rate_limited":
         rotator.record_rate_limited(account.id, model=model)
-    elif event == "auth_error":
-        rotator.record_auth_error(account.id, model=model)
     elif event == "session_expired":
         rotator.record_session_expired(account.id, model=model)
     elif event == "error":

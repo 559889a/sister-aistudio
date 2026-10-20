@@ -187,65 +187,6 @@ async def test_transport_stream_fails_when_page_closed():
 
 
 @pytest.mark.asyncio
-async def test_transport_abort_stream_by_rid():
-    """Verify abort_stream targets specific active stream by rid without disturbing other streams."""
-    transport = XHRStreamTransport()
-    page = MagicMock(spec=CDPPage)
-    page.on_binding = MagicMock()
-    page.add_binding = AsyncMock()
-
-    captured_rids: list[str] = []
-
-    async def fake_evaluate(expr, args=None, *a, **kw):
-        if isinstance(args, dict) and "rid" in args:
-            captured_rids.append(args["rid"])
-        return
-
-    page.evaluate = AsyncMock(side_effect=fake_evaluate)
-
-    assert transport.in_flight_count == 0
-
-    async def run_stream():
-        async for _ in transport.send_streaming_request(
-            page,
-            url="http://test.com",
-            headers={},
-            body="{}",
-        ):
-            pass
-
-    task1 = asyncio.create_task(run_stream())
-    task2 = asyncio.create_task(run_stream())
-    await asyncio.sleep(0.05)
-    assert transport.in_flight_count == 2
-    assert len(captured_rids) == 2
-
-    # Abort unknown rid returns False
-    assert transport.abort_stream("non_existent_rid") is False
-    assert transport.in_flight_count == 2
-
-    # Abort stream 1 specifically
-    rid1 = captured_rids[0]
-    assert transport.abort_stream(rid1, "client_disconnected") is True
-
-    with pytest.raises(
-        RuntimeError, match="streaming request failed: client_disconnected"
-    ):
-        await task1
-
-    assert transport.in_flight_count == 1
-
-    # Close transport interrupts remaining stream 2
-    transport.close("transport_closed")
-    with pytest.raises(
-        RuntimeError, match="streaming request failed: transport_closed"
-    ):
-        await task2
-
-    assert transport.in_flight_count == 0
-
-
-@pytest.mark.asyncio
 async def test_replay_failure_logs_cdp_net_layer_evidence(caplog):
     """页面 fetch 失败时要把 Network.loadingFailed 的 errorText 打进日志（断连归因）。"""
     from aistudio_api.domain.errors import BrowserTransportError

@@ -287,21 +287,6 @@ class AccountStats:
         if model:
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
 
-    def record_auth_error(
-        self, model: str | None = None, cooldown_seconds: float = 300.0
-    ) -> None:
-        """记录鉴权/权限错误（403/401），立即冷却该账号以便快速故障转移。"""
-        now = time.time()
-        self.requests += 1
-        self.errors += 1
-        self.auth_errors += 1
-        self.last_auth_error = now
-        self.last_used = now
-        self.auth_cooldown = now + cooldown_seconds
-        model = normalize_model_key(model)
-        if model:
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
-
     def record_session_expired(self, model: str | None = None) -> None:
         """记录账号登录态失效（被重定向到登录页），将该账号隔离并在未更新前禁止使用。"""
         now = time.time()
@@ -523,8 +508,6 @@ class AccountRotator:
         model: str | None = None,
         current_account_id: str | None = None,
         failed_account_id: str | None = None,
-        *,
-        is_session_expired: bool = False,
     ) -> AccountMeta | None:
         """获取下一个可用账号（排除失败账号，优先平滑故障转移至健康账号）。"""
         async with self._lock:
@@ -558,7 +541,6 @@ class AccountRotator:
                     key=lambda x: (
                         x[1].model_requests.get(norm_m, 0) if norm_m else 0,
                         x[1].requests,
-                        x[1].auth_errors,
                         x[1].errors,
                         x[1].last_used,
                     ),
@@ -566,8 +548,6 @@ class AccountRotator:
                 if current_account_id and account.id != current_account_id:
                     logger.info("账号故障转移切换: %s (model=%s)", account.name, model)
                 return account
-            if is_session_expired:
-                return None
             if failed_account_id:
                 for a, _ in available:
                     if a.id == failed_account_id:
@@ -606,24 +586,6 @@ class AccountRotator:
         if account_id not in self._stats:
             self._stats[account_id] = AccountStats(account_id=account_id)
         self._stats[account_id].record_error(model)
-        self.save_state()
-
-    def record_auth_error(
-        self,
-        account_id: str,
-        model: str | None = None,
-        cooldown_seconds: float = 300.0,
-    ) -> None:
-        if account_id not in self._stats:
-            self._stats[account_id] = AccountStats(account_id=account_id)
-        self._stats[account_id].record_auth_error(
-            model, cooldown_seconds=cooldown_seconds
-        )
-        logger.warning(
-            "账号 %s 遇到 403 权限拒绝，暂停使用 %ds 并切换备用账号",
-            account_id,
-            int(cooldown_seconds),
-        )
         self.save_state()
 
     def record_session_expired(

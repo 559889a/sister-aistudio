@@ -112,12 +112,6 @@ def classify_error(status: int, body: str) -> AistudioError:
         return AuthError(f"禁止访问: {clean_msg}")
     effective_status = GRPC_CODE_TO_HTTP.get(grpc_code, status) if grpc_code else status
     return RequestError(effective_status, clean_msg)
-def is_transient_rpc_error(exc: Exception) -> bool:
-    """识别 Google 上游偶发且完全随机的 RPC 路由 404 (Ambiguous request for service)。"""
-    if isinstance(exc, RequestError) and exc.status == 404:
-        err = str(exc).lower()
-        return "ambiguous request for service" in err and "generatecontent" in err
-    return False
 
 
 def is_browser_session_hang_error(exc: Exception) -> bool:

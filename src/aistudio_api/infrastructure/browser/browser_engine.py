@@ -1,6 +1,8 @@
 """Shared helpers for selecting and launching the Chromium browser backend.
 
 Provides direct Chromium subprocess launching with stealth and performance flags.
+仅支持 Windows 宿主（2026-10-20 起；Termux/Linux/Docker 路径已移除），
+Windows 看护用 Job Object（KILL_ON_JOB_CLOSE），非 Windows 宿主只做无害兜底。
 """
 
 from __future__ import annotations
@@ -28,36 +30,6 @@ def _derive_stable_fingerprint_seed(key: str) -> int:
     return 10000 + (int(digest[:8], 16) % 90000)
 
 
-def _is_termux() -> bool:
-    """True iff running inside Termux (host or via app)."""
-    return platform.system() == "Android" or os.environ.get("PREFIX", "").startswith(
-        "/data/data/com.termux"
-    )
-
-
-def _find_wrapper_path() -> str | None:
-    project_root = Path(__file__).resolve().parents[4]
-    wrapper = project_root / "scripts" / "cloakbrowser_termux" / "run-chrome.sh"
-    if wrapper.is_file() and os.access(wrapper, os.X_OK):
-        return str(wrapper)
-    return None
-
-
-def _resolve_local_chrome(match: str) -> str:
-    """Route Termux chrome launches through the proot wrapper.
-
-    On Termux the kernel loader cannot run glibc-built CloakBrowser, so the
-    wrapper re-execs the binary inside ``proot-distro login <container>``.
-    On every other host we return the binary path unchanged.
-    """
-    if _is_termux():
-        wrapper = _find_wrapper_path()
-        if wrapper:
-            log.debug("Termux 宿主: 路由 %s 至启动脚本 %s", match, wrapper)
-            return wrapper
-    return match
-
-
 def find_chromium_executable() -> str:
     """Find the best Chromium executable available on the system."""
     # 1. Configured explicit path
@@ -68,63 +40,34 @@ def find_chromium_executable() -> str:
         return settings.browser_executable_path
 
     project_root = Path(__file__).resolve().parents[4]
-    # 2. Local project-scoped CloakBrowser (.cloakbrowser/**/chrome)
+    # 2. Local project-scoped CloakBrowser (.cloakbrowser/**/chrome.exe)
     cloak_dir = project_root / ".cloakbrowser"
     if cloak_dir.is_dir():
-        for pat in (
-            "**/chrome",
-            "**/Chromium.app/Contents/MacOS/Chromium",
-            "**/chrome.exe",
-        ):
+        for pat in ("**/chrome.exe", "**/chrome"):
             local_matches = sorted(cloak_dir.glob(pat))
             for match in reversed(local_matches):
                 if match.is_file() and (
                     os.access(match, os.X_OK) or platform.system() == "Windows"
                 ):
-                    return _resolve_local_chrome(str(match))
+                    return str(match)
 
-    # 3. User-level CloakBrowser (~/.cloakbrowser/**/chrome)
+    # 3. User-level CloakBrowser (~/.cloakbrowser/**/chrome.exe)
     user_cloak_dir = Path.home() / ".cloakbrowser"
     if user_cloak_dir.is_dir():
-        for pat in (
-            "**/chrome",
-            "**/chrome.exe",
-            "**/Chromium.app/Contents/MacOS/Chromium",
-        ):
+        for pat in ("**/chrome.exe", "**/chrome"):
             cloak_matches = sorted(user_cloak_dir.glob(pat))
             for match in reversed(cloak_matches):
                 if match.is_file() and (
                     os.access(match, os.X_OK) or platform.system() == "Windows"
                 ):
-                    return _resolve_local_chrome(str(match))
-    # 4. System-level CloakBrowser (/opt/cloakbrowser/**/chrome)
-    opt_cloak_dir = Path("/opt/cloakbrowser")
-    if opt_cloak_dir.is_dir():
-        for pat in (
-            "chrome",
-            "**/chrome",
-        ):
-            opt_matches = sorted(opt_cloak_dir.glob(pat))
-            for match in reversed(opt_matches):
-                if match.is_file() and (
-                    os.access(match, os.X_OK) or platform.system() == "Windows"
-                ):
-                    return _resolve_local_chrome(str(match))
+                    return str(match)
 
-    # 5. In Termux with proot-distro container: check wrapper path
-    if _is_termux():
-        wrapper = _find_wrapper_path()
-        if wrapper:
-            return wrapper
-
-    # 6. Strictly CloakBrowser only. All fallbacks to Edge/Chrome/Brave/Chromium are removed!
+    # 4. Strictly CloakBrowser only. All fallbacks to Edge/Chrome/Brave/Chromium are removed!
     raise FileNotFoundError(
         "未检测到 CloakBrowser 浏览器。\n"
         "本项目仅支持 CloakBrowser，不支持 Edge 或标准 Chrome。\n"
-        "请先安装 CloakBrowser：\n"
-        "  - Windows: 运行 scripts\\install-browser.bat\n"
-        "  - Linux / Termux: 运行 bash scripts/setup-browser.sh\n"
-        "若已安装在自定义路径，请设置 AISTUDIO_BROWSER_EXECUTABLE 环境变量。"
+        "请先安装 CloakBrowser（Windows 运行 scripts\\install-browser.bat），\n"
+        "或设置 AISTUDIO_BROWSER_EXECUTABLE 环境变量指向自定义路径。"
     )
 
 
@@ -210,12 +153,9 @@ def build_chromium_args(
     )
     if fingerprint_seed is not None:
         args.append(f"--fingerprint={fingerprint_seed}")
-    if platform.system() == "Darwin":
-        args.append("--fingerprint-platform=macos")
-    else:
-        # 遵循 CloakBrowser 官方反爬指纹规范：在 Linux / Termux / Docker 宿主上
-        # 统一伪装为受众最广、风控阈值最友好的 Windows 桌面指纹池
-        args.append("--fingerprint-platform=windows")
+    # 遵循 CloakBrowser 官方反爬指纹规范：统一伪装为受众最广、风控阈值最友好的
+    # Windows 桌面指纹池
+    args.append("--fingerprint-platform=windows")
 
     effective_tz = timezone or settings.timezone
     effective_locale = locale or settings.locale
@@ -225,19 +165,6 @@ def build_chromium_args(
     if extra_args:
         args.extend(extra_args)
     return args
-
-
-def _setup_child_pdeathsig() -> None:
-    """Configure Linux kernel to send SIGKILL to this child process if the parent dies."""
-    if platform.system() in ("Linux", "Android") or _is_termux():
-        try:
-            import ctypes
-
-            libc = ctypes.CDLL(None)
-            # PR_SET_PDEATHSIG = 1
-            libc.prctl(1, signal.SIGKILL, 0, 0, 0)
-        except Exception:
-            pass
 
 
 def _get_process_cmdline_windows(pid: int) -> str:
@@ -440,21 +367,6 @@ def _is_active_api_server(pid: int) -> bool:
         return bool(
             cmd and any(k in cmd for k in ("main.py", "aistudio-api-server", "uvicorn"))
         )
-
-    try:
-        cmdline_path = Path(f"/proc/{pid}/cmdline")
-        if cmdline_path.exists():
-            cmd = (
-                cmdline_path.read_bytes()
-                .decode("utf-8", errors="ignore")
-                .replace("\x00", " ")
-            )
-            if any(
-                k in cmd for k in ("main.py server", "aistudio-api-server", "uvicorn")
-            ):
-                return True
-    except Exception:
-        pass
     return False
 
 
@@ -483,119 +395,44 @@ def cleanup_stale_chromium(
         2. Stale processes matching port/data-dir left behind from past crashes.
     Also cleans up stale lock files in user_data_dir and waits for port release.
     """
+    if platform.system() != "Windows":
+        return []
+
     cur_pid = os.getpid()
     parent_pid = os.getppid()
     candidate_pids: set[int] = set()
 
-    if platform.system() == "Windows":
-        proc_list = _get_process_list_windows()
-        parent_map = {p[0]: p[1] for p in proc_list}
+    proc_list = _get_process_list_windows()
+    parent_map = {p[0]: p[1] for p in proc_list}
 
-        # 1. Check if the target port is held by any listening process
-        listener_pid = _find_pid_listening_on_port_windows(port)
-        if (
-            listener_pid
-            and listener_pid not in (cur_pid, parent_pid)
-            and listener_pid > 1
+    # 1. Check if the target port is held by any listening process
+    listener_pid = _find_pid_listening_on_port_windows(port)
+    if (
+        listener_pid
+        and listener_pid not in (cur_pid, parent_pid)
+        and listener_pid > 1
+    ):
+        # SAFETY GUARANTEE: Never touch listener if it or its parent is an active API server!
+        listener_parent = parent_map.get(listener_pid, 0)
+        if not _is_active_api_server(listener_pid) and not (
+            listener_parent > 1 and _is_active_api_server(listener_parent)
         ):
-            # SAFETY GUARANTEE: Never touch listener if it or its parent is an active API server!
-            listener_parent = parent_map.get(listener_pid, 0)
-            if not _is_active_api_server(listener_pid) and not (
-                listener_parent > 1 and _is_active_api_server(listener_parent)
-            ):
-                candidate_pids.add(listener_pid)
+            candidate_pids.add(listener_pid)
 
-        # 2. Check running chrome.exe processes matching port or data dir
-        for c_pid, c_ppid, exe_name in proc_list:
-            if exe_name.lower() != "chrome.exe":
-                continue
-            if c_pid in (cur_pid, parent_pid) or c_pid <= 1:
-                continue
-            if c_ppid > 1 and _is_active_api_server(c_ppid):
-                continue
-            c_cmd = _get_process_cmdline_windows(c_pid)
-            if f"--remote-debugging-port={port}" in c_cmd or (
-                user_data_dir and user_data_dir in c_cmd
-            ):
-                candidate_pids.add(c_pid)
-    else:
-        proc_dir = Path("/proc")
-        if proc_dir.is_dir():
-            for proc_path in proc_dir.glob("[0-9]*"):
-                try:
-                    pid = int(proc_path.name)
-                except ValueError:
-                    continue
-                if pid in (cur_pid, parent_pid):
-                    continue
+    # 2. Check running chrome.exe processes matching port or data dir
+    for c_pid, c_ppid, exe_name in proc_list:
+        if exe_name.lower() != "chrome.exe":
+            continue
+        if c_pid in (cur_pid, parent_pid) or c_pid <= 1:
+            continue
+        if c_ppid > 1 and _is_active_api_server(c_ppid):
+            continue
+        c_cmd = _get_process_cmdline_windows(c_pid)
+        if f"--remote-debugging-port={port}" in c_cmd or (
+            user_data_dir and user_data_dir in c_cmd
+        ):
+            candidate_pids.add(c_pid)
 
-                # Safety check: if parent is a live active API server, NEVER touch it!
-                ppid = 0
-                try:
-                    with Path(f"/proc/{pid}/status").open(encoding="utf-8") as sf:
-                        for line in sf:
-                            if line.startswith("PPid:"):
-                                ppid = int(line.split(":", 1)[1].strip())
-                                break
-                except Exception:
-                    pass
-
-                if ppid > 1 and _is_active_api_server(ppid):
-                    continue
-
-                try:
-                    with Path(f"/proc/{pid}/cmdline").open("rb") as cf:
-                        cmd = (
-                            cf.read()
-                            .decode("utf-8", errors="ignore")
-                            .replace("\x00", " ")
-                        )
-                    match_port = f"--remote-debugging-port={port}" in cmd
-                    match_udd = bool(
-                        user_data_dir
-                        and user_data_dir in cmd
-                        and ("chrome" in cmd or "proot" in cmd)
-                    )
-                    match_orphan_proot = bool(
-                        "proot" in cmd
-                        and ("cloakbrowser" in cmd or "chrome" in cmd)
-                        and ppid == 1
-                    )
-                    if match_port or match_udd or match_orphan_proot:
-                        candidate_pids.add(pid)
-                except Exception:
-                    pass
-        else:
-            # Non-/proc POSIX fallback (e.g. macOS)
-            try:
-                res = subprocess.run(
-                    ["ps", "-eo", "pid,ppid,args"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                for line in res.stdout.splitlines()[1:]:
-                    parts = line.strip().split(None, 2)
-                    if len(parts) < 3:
-                        continue
-                    try:
-                        pid = int(parts[0])
-                        ppid = int(parts[1])
-                        cmd = parts[2]
-                    except ValueError:
-                        continue
-                    if pid in (cur_pid, parent_pid):
-                        continue
-                    if ppid > 1 and _is_active_api_server(ppid):
-                        continue
-                    if (
-                        f"--remote-debugging-port={port}" in cmd
-                        or (user_data_dir and user_data_dir in cmd and "chrome" in cmd)
-                        or ("chrome" in cmd and ppid == 1)
-                    ):
-                        candidate_pids.add(pid)
-            except Exception as e:
-                log.debug("备用进程扫描失败: %s", e)
     killed_pids: list[int] = []
     if candidate_pids:
         log.info(
@@ -603,57 +440,18 @@ def cleanup_stale_chromium(
             len(candidate_pids),
             sorted(candidate_pids),
         )
-        if platform.system() == "Windows":
-            for pid in sorted(candidate_pids):
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        capture_output=True,
-                        check=False,
-                    )
-                    killed_pids.append(pid)
-                except Exception as e:
-                    log.debug("Windows taskkill 终止 PID %d 失败: %s", pid, e)
-        else:
-            # 1. Send SIGTERM to process groups or pids
-            for pid in sorted(candidate_pids):
-                try:
-                    pgid = os.getpgid(pid) if hasattr(os, "getpgid") else None
-                    if pgid is not None and pgid != os.getpgrp():
-                        os.killpg(pgid, signal.SIGTERM)
-                    else:
-                        os.kill(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                except Exception as e:
-                    log.debug("向 PID %d 发送 SIGTERM 失败: %s", pid, e)
+        for pid in sorted(candidate_pids):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    check=False,
+                )
+                killed_pids.append(pid)
+            except Exception as e:
+                log.debug("Windows taskkill 终止 PID %d 失败: %s", pid, e)
 
-            # 2. Wait up to 1.0s for graceful shutdown
-            deadline = time.time() + 1.0
-            while time.time() < deadline:
-                if Path("/proc").is_dir():
-                    alive = [p for p in candidate_pids if Path(f"/proc/{p}").exists()]
-                else:
-                    alive = []
-                if not alive:
-                    break
-                time.sleep(0.1)
-
-            # 3. Force SIGKILL any remaining candidates
-            sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
-            for pid in sorted(candidate_pids):
-                try:
-                    pgid = os.getpgid(pid) if hasattr(os, "getpgid") else None
-                    if pgid is not None and pgid != os.getpgrp():
-                        os.killpg(pgid, sig_kill)
-                    else:
-                        os.kill(pid, sig_kill)
-                    killed_pids.append(pid)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                except Exception as e:
-                    log.debug("向 PID %d 发送 SIGKILL 失败: %s", pid, e)
-    # 4. Clean up stale Chromium lock files in user_data_dir
+    # 3. Clean up stale Chromium lock files in user_data_dir
     if user_data_dir:
         udd_path = Path(user_data_dir)
         if udd_path.is_dir():
@@ -671,7 +469,7 @@ def cleanup_stale_chromium(
                     except Exception as e:
                         log.debug("移除锁文件 %s 失败: %s", lock_file, e)
 
-    # 5. Wait until port is verified free
+    # 4. Wait until port is verified free
     if _is_port_in_use(port):
         port_deadline = time.time() + timeout_s
         while time.time() < port_deadline and _is_port_in_use(port):
@@ -765,64 +563,6 @@ def _assign_process_to_job(job_handle: int | None, proc_handle: int) -> bool:
         return False
 
 
-def _spawn_process_watchdog(
-    target_pid: int, target_pgid: int | None
-) -> tuple[subprocess.Popen[bytes] | None, int | None]:
-    """Spawn a lightweight companion process that monitors parent process via pipe EOF.
-
-    When this Python parent process dies (even via SIGKILL or OOM), the kernel automatically
-    closes the pipe write-end. The companion process unblocks on EOF and sends SIGKILL
-    to the entire browser process group, leaving zero orphans.
-    """
-    if platform.system() == "Windows":
-        return None, None
-
-    try:
-        pipe_r, pipe_w = os.pipe()
-        watcher_code = (
-            "import os, sys, signal, time\n"
-            "try:\n"
-            "    r = int(sys.argv[1])\n"
-            "    t_pid = int(sys.argv[2])\n"
-            "    t_pgid = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] != 'None' else None\n"
-            "    os.read(r, 1)\n"
-            "except Exception:\n"
-            "    pass\n"
-            "if t_pgid is not None:\n"
-            "    try:\n"
-            "        os.killpg(t_pgid, signal.SIGTERM)\n"
-            "        time.sleep(0.2)\n"
-            "        os.killpg(t_pgid, signal.SIGKILL)\n"
-            "    except Exception:\n"
-            "        pass\n"
-            "try:\n"
-            "    os.kill(t_pid, signal.SIGKILL)\n"
-            "except Exception:\n"
-            "    pass\n"
-        )
-        cmd = [
-            sys.executable,
-            "-c",
-            watcher_code,
-            str(pipe_r),
-            str(target_pid),
-            str(target_pgid) if target_pgid is not None else "None",
-        ]
-        watcher = subprocess.Popen(
-            cmd,
-            pass_fds=[pipe_r],
-            preexec_fn=_setup_child_pdeathsig,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        os.close(pipe_r)
-        return watcher, pipe_w
-    except Exception as e:
-        log.debug("创建浏览器守护进程失败: %s", e)
-        return None, None
-
-
 _ACTIVE_CHROMIUM_PROCESSES: set[ChromiumProcess] = set()
 
 
@@ -837,7 +577,7 @@ _cleanup_handlers_installed: bool = False
 
 
 def install_process_cleanup_handlers() -> None:
-    """Register atexit and POSIX signal handlers to guarantee browser termination on process exit."""
+    """Register atexit and signal handlers to guarantee browser termination on process exit."""
     global _cleanup_handlers_installed
     if _cleanup_handlers_installed:
         return
@@ -845,60 +585,36 @@ def install_process_cleanup_handlers() -> None:
 
     atexit.register(_cleanup_all_chromium)
 
-    if platform.system() == "Windows":
-        sigbreak = getattr(signal, "SIGBREAK", None)
-        signals_to_hook = [signal.SIGINT]
-        if sigbreak is not None:
-            signals_to_hook.append(sigbreak)
-        for sig in signals_to_hook:
-            try:
-                prev_handler = signal.getsignal(sig)
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    signals_to_hook = [signal.SIGINT]
+    if sigbreak is not None:
+        signals_to_hook.append(sigbreak)
+    for sig in signals_to_hook:
+        try:
+            prev_handler = signal.getsignal(sig)
 
-                def _make_win_handler(prev: object):
-                    def _handler(signum: int, frame: object) -> None:
-                        _cleanup_all_chromium()
-                        if callable(prev) and prev not in (
-                            signal.SIG_IGN,
-                            signal.SIG_DFL,
-                        ):
-                            prev(signum, frame)
-                        elif signum == signal.SIGINT:
-                            raise KeyboardInterrupt
-                        else:
-                            sys.exit(128 + signum)
+            def _make_handler(prev: object):
+                def _handler(signum: int, frame: object) -> None:
+                    _cleanup_all_chromium()
+                    if callable(prev) and prev not in (
+                        signal.SIG_IGN,
+                        signal.SIG_DFL,
+                    ):
+                        prev(signum, frame)
+                    elif signum == signal.SIGINT:
+                        raise KeyboardInterrupt
+                    else:
+                        sys.exit(128 + signum)
 
-                    return _handler
+                return _handler
 
-                signal.signal(sig, _make_win_handler(prev_handler))
-            except (ValueError, AttributeError, TypeError):
-                pass
-    else:
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            try:
-                prev_handler = signal.getsignal(sig)
-
-                def _make_handler(prev: object):
-                    def _handler(signum: int, frame: object) -> None:
-                        _cleanup_all_chromium()
-                        if callable(prev) and prev not in (
-                            signal.SIG_IGN,
-                            signal.SIG_DFL,
-                        ):
-                            prev(signum, frame)
-                        elif signum == signal.SIGINT:
-                            raise KeyboardInterrupt
-                        else:
-                            sys.exit(128 + signum)
-
-                    return _handler
-
-                signal.signal(sig, _make_handler(prev_handler))
-            except (ValueError, AttributeError, TypeError):
-                pass
+            signal.signal(sig, _make_handler(prev_handler))
+        except (ValueError, AttributeError, TypeError):
+            pass
 
 
 class ChromiumProcess:
-    """Manages lifecycle of a direct Chromium subprocess with companion watchdog."""
+    """Manages lifecycle of a direct Chromium subprocess (Windows Job Object 看护)."""
 
     def __init__(
         self,
@@ -906,46 +622,20 @@ class ChromiumProcess:
         port: int,
         user_data_dir: str | None = None,
         *,
-        watcher: subprocess.Popen[bytes] | None = None,
-        pipe_w: int | None = None,
-        pgid: int | None = None,
         job: int | None = None,
     ):
         self.process = process
         self.port = port
         self.user_data_dir = user_data_dir
-        self.watcher = watcher
-        self.pipe_w = pipe_w
         self.job = job
-        try:
-            self.pgid = pgid or (
-                os.getpgid(process.pid) if hasattr(os, "getpgid") else None
-            )
-        except Exception:
-            self.pgid = None
         _ACTIVE_CHROMIUM_PROCESSES.add(self)
 
     def is_alive(self) -> bool:
         return self.process.poll() is None
 
     def terminate(self, timeout_s: float = 3.0) -> None:
-        """Terminate the Chromium subprocess tree and companion watchdog safely."""
+        """Terminate the Chromium subprocess tree safely."""
         _ACTIVE_CHROMIUM_PROCESSES.discard(self)
-
-        # Close the write end of the pipe so the companion watchdog knows to exit cleanly
-        if self.pipe_w is not None:
-            with contextlib.suppress(Exception):
-                os.close(self.pipe_w)
-            self.pipe_w = None
-
-        if self.watcher is not None and self.watcher.poll() is None:
-            try:
-                self.watcher.terminate()
-                self.watcher.wait(timeout=1.0)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    self.watcher.kill()
-            self.watcher = None
 
         # Close Windows Job Object if present (kills job processes on handle close)
         if self.job is not None:
@@ -963,51 +653,22 @@ class ChromiumProcess:
         if self.process.poll() is not None:
             return
 
-        if platform.system() == "Windows":
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
-                        capture_output=True,
-                        check=False,
-                    )
-                except Exception:
-                    self.process.kill()
-            except Exception as e:
-                log.debug("Windows 下关闭 Chromium 异常: %s", e)
-            return
-
-        # POSIX (Linux, macOS, Termux, Docker)
-        pgid = self.pgid
-        if pgid is None:
-            try:
-                pgid = os.getpgid(self.process.pid)
-            except (ProcessLookupError, AttributeError):
-                pgid = None
-
-        if pgid is not None and pgid != os.getpgrp():
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(pgid, signal.SIGTERM)
-        else:
-            with contextlib.suppress(Exception):
-                self.process.terminate()
-
         try:
+            self.process.terminate()
             self.process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
-            if pgid is not None and pgid != os.getpgrp():
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(pgid, sig_kill)
-            with contextlib.suppress(ProcessLookupError, PermissionError):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                    capture_output=True,
+                    check=False,
+                )
+            except Exception:
                 self.process.kill()
-            with contextlib.suppress(Exception):
-                self.process.wait(timeout=1.0)
         except Exception as e:
             log.debug("关闭 Chromium 异常: %s", e)
+            with contextlib.suppress(Exception):
+                self.process.kill()
 
 
 def launch_chromium_process(
@@ -1039,13 +700,11 @@ def launch_chromium_process(
     cmd = [executable, *args]
     log.info("正在启动 CloakBrowser 进程: %s (调试端口 %d)", executable, port)
 
-    preexec = _setup_child_pdeathsig if platform.system() != "Windows" else None
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
-        preexec_fn=preexec,
     )
 
     job = None
@@ -1054,18 +713,4 @@ def launch_chromium_process(
         proc_handle = getattr(proc, "_handle", None)
         if job and proc_handle:
             _assign_process_to_job(job, int(proc_handle))
-
-    pgid = None
-    with contextlib.suppress(Exception):
-        pgid = os.getpgid(proc.pid)
-
-    watcher, pipe_w = _spawn_process_watchdog(target_pid=proc.pid, target_pgid=pgid)
-    return ChromiumProcess(
-        proc,
-        port,
-        user_data_dir,
-        watcher=watcher,
-        pipe_w=pipe_w,
-        pgid=pgid,
-        job=job,
-    )
+    return ChromiumProcess(proc, port, user_data_dir, job=job)
