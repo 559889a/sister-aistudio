@@ -57,37 +57,58 @@ async def lifespan(_app: FastAPI):
     # 上游通道选择（2026-10-20 用户指派引入）：aistudio（默认，浏览器+账号池）/
     # vertex_express（官方 Key 直连）/ console_graphql（Cloud 控制台 Cookie 直连）。
     # 后两条无浏览器、无账号池语义，错误原样透传、零自动重试。
-    upstream_mode = str(getattr(settings, "upstream_mode", "aistudio") or "aistudio").lower()
-    if upstream_mode == "vertex_express":
+    # 三通道并存（2026-10-20）：pg/ 无头浏览器（默认）+ express/ + cookie/，
+    # 按模型名前缀选路（infrastructure/upstreams/registry.py）。AISTUDIO_UPSTREAM
+    # 仅作为「默认通道」的覆盖项；各通道只在凭据齐备时注册。
+    from aistudio_api.infrastructure.upstreams.registry import (
+        UpstreamRegistry,
+    )
+
+    registry = UpstreamRegistry()
+    # 单浏览器（用户 2026-10-20 拍板：不再要浏览器 worker 池）；账号池保留——
+    # 多账号在这台浏览器上轮换（蓝绿热切，在途流不中断）。
+    client = AIStudioClient(port=runtime_state.browser_port)
+    runtime_state.client = client
+    registry.register("aistudio", client)
+
+    default_override = str(getattr(settings, "upstream_mode", "") or "").lower()
+    if default_override in ("vertex_express", "console_graphql"):
+        # 无前缀模型也指到 override 通道（仍可用 pg/ 强制走浏览器）
+        registry.default_channel = default_override
+
+    if settings.vertex_express_api_key:
         from aistudio_api.infrastructure.upstreams.vertex_express import (
             VertexExpressClient,
         )
 
-        client = VertexExpressClient(
-            settings.vertex_express_api_key,
-            project_id=settings.google_project_id,
-            location=settings.express_location,
-            proxy_url=settings.proxy_url,
+        registry.register(
+            "vertex_express",
+            VertexExpressClient(
+                settings.vertex_express_api_key,
+                project_id=settings.google_project_id,
+                location=settings.express_location,
+                proxy_url=settings.proxy_url,
+            ),
         )
-        runtime_state.client = client
-        logger.info("Client initialized (upstream=vertex_express)")
-    elif upstream_mode == "console_graphql":
+        logger.info("upstream registered: express/")
+    if settings.console_cookie and settings.console_project_id:
         from aistudio_api.infrastructure.upstreams.console_graphql import (
             ConsoleGraphqlClient,
         )
 
-        client = ConsoleGraphqlClient(
-            settings.console_cookie,
-            settings.console_project_id,
-            proxy_url=settings.proxy_url,
-        )
-        runtime_state.client = client
-        logger.info("Client initialized (upstream=console_graphql)")
-    else:
-        # 单浏览器（用户 2026-10-20 拍板：不再要浏览器 worker 池）；账号池保留——
-        # 多账号在这台浏览器上轮换（蓝绿热切，在途流不中断）。
-        client = AIStudioClient(port=runtime_state.browser_port)
-        runtime_state.client = client
+        try:
+            registry.register(
+                "console_graphql",
+                ConsoleGraphqlClient(
+                    settings.console_cookie,
+                    settings.console_project_id,
+                    proxy_url=settings.proxy_url,
+                ),
+            )
+            logger.info("upstream registered: cookie/")
+        except ValueError as exc:
+            logger.warning("cookie/ 通道未注册: %s", exc)
+    runtime_state.upstreams = registry
 
     # 初始化账号管理服务
     account_store = AccountStore()

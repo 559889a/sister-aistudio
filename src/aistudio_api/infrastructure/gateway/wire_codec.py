@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from aistudio_api.config import DEFAULT_TEXT_MODEL, settings
+from aistudio_api.infrastructure.utils.logger import get_logger
 
 from .model_defaults import resolve_model_defaults
 from .wire_parser import (
@@ -31,6 +32,8 @@ TOOLS_TEMPLATES: dict[str, list[object]] = {
     "google_maps": [None, None, None, None, None, None, None, None, None, None, []],
     "url_context": [None, None, None, None, None, None, None, []],
 }
+
+logger = get_logger("wire_codec")
 
 
 def build_image_generation_search_tool(
@@ -225,6 +228,26 @@ class AistudioWireCodec:
         )
         body[self.SESSION_TOKEN_INDEX] = request.session_token
         body[self.TIMEZONE_INDEX] = request.location
+
+        # 实验性流式抗截断（pg 通道探针）：往未认领的顶层下标注入等价
+        # streamFunctionCallArguments 开关。静态逆向证明 MakerSuite wire 无
+        # toolConfig 槽位（大概率被忽略/小概率 400）——这一注就是为了拿运行期
+        # 证据：万一服务端 proto 比前端新，它就生效了。下标可用 env 调整。
+        if request.tools:
+            from aistudio_api.infrastructure.upstreams.common import (
+                channel_streaming_flag_enabled,
+            )
+
+            if channel_streaming_flag_enabled():
+                import os
+
+                probe_idx = int(os.getenv("AISTUDIO_WIRE_TOOLCONFIG_IDX", "9"))
+                self._ensure_len(body, probe_idx + 1)
+                body[probe_idx] = [[1, None, True]]  # [mode=AUTO, allowed, streamArgs]
+                logger.info(
+                    "[流式抗截断探针] pg 通道已在顶层 idx%d 注入 toolConfig 开关（赌服务端映射）",
+                    probe_idx,
+                )
 
         model_defaults = resolve_model_defaults(request.model)
         if model_defaults.is_image_model:

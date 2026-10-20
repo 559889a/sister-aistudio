@@ -239,8 +239,18 @@ async function loadSchema() {
   }
 }
 
+// 互斥开关（schema.mutex）：开一个立刻在表单里关掉另一个，保存后服务端再强制一遍
+const MUTEX: Record<string, string> = {
+  bypassEnabled: 'bypassStreamAntiTruncation',
+  bypassStreamAntiTruncation: 'bypassEnabled',
+}
+
 function setFieldValue(key: string, value: FormValue) {
-  form.value = { ...form.value, [key]: value }
+  const next = { ...form.value, [key]: value }
+  if (value === true && MUTEX[key] && next[MUTEX[key]] === true) {
+    next[MUTEX[key]] = false
+  }
+  form.value = next
   if (fieldErrors.value[key]) {
     const nextErrors = { ...fieldErrors.value }
     delete nextErrors[key]

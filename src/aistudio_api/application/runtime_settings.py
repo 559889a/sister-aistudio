@@ -166,6 +166,7 @@ SCHEMA: list[dict[str, Any]] = [
         "type": "bool",
         "default": False,
         "group": "bypass",
+        "mutex": "bypassStreamAntiTruncation",
         "label": "启用工具调用 bypass",
         "desc": "让模型把正文写进一次合成函数调用的参数里，网关再还原成普通正文。用于绕开只扫描正文流的外部审查截断。",
     },
@@ -181,8 +182,7 @@ SCHEMA: list[dict[str, Any]] = [
         "group": "bypass",
         "label": "模型压根没调这个工具时",
         "desc": "报错模式便于确认预设有没有把控制指令压掉；日常用「就用它直接输出的正文」。",
-        "depends_on": {"bypassEnabled": [True]},
-        "advanced": True,
+                "advanced": True,
     },
     {
         "key": "bypassMergeOutside",
@@ -191,7 +191,6 @@ SCHEMA: list[dict[str, Any]] = [
         "group": "bypass",
         "label": "合并写在工具外面的正文",
         "desc": "模型只把一部分放进工具、其余直接写出来时，把两边按顺序合并去重。关掉则只取工具里那份，可能丢内容。",
-        "depends_on": {"bypassEnabled": [True]},
         "advanced": True,
     },
     {
@@ -207,8 +206,7 @@ SCHEMA: list[dict[str, Any]] = [
         "group": "bypass",
         "label": "控制指令放哪",
         "desc": "控制指令就是告诉模型「通过这个工具输出」的那段话。",
-        "depends_on": {"bypassEnabled": [True]},
-        "advanced": True,
+                "advanced": True,
     },
     {
         "key": "bypassInstruction",
@@ -218,8 +216,7 @@ SCHEMA: list[dict[str, Any]] = [
         "group": "bypass",
         "label": "自定义控制指令",
         "desc": "留空 = 用内置指令（互动式小说语境的投递指令）。`{tool}` 会替换成本次的工具名。",
-        "depends_on": {"bypassEnabled": [True]},
-        "advanced": True,
+                "advanced": True,
     },
     {
         "key": "sigSentinelThought",
@@ -242,6 +239,20 @@ SCHEMA: list[dict[str, Any]] = [
         "desc": "把 functionCall part 上的签名（含 bypass 回放的那一份）同样换成哨兵值。默认开；要用真签名回放就关掉它。",
     },
     {
+        "key": "bypassStreamAntiTruncation",
+        "type": "bool",
+        "default": False,
+        "group": "bypass",
+        "label": "实验性工具调用流式抗截断",
+        # 与「工具调用 bypass」互斥（用户 2026-10-20 拍板：不能同开，可以同关）
+        "mutex": "bypassEnabled",
+        "desc": (
+            "express/cookie 通道上给合成工具开 streamFunctionCallArguments，参数逐片流式到达，"
+            "bypass 也能真流式；pg 通道会向 wire 注入等价开关做实验探测。提示词注入位置与文案、"
+            "合成工具语义全部复用工具调用 bypass 的设置。开启时另一个开关自动关闭。"
+        ),
+    },
+    {
         "key": "bypassToolPrefix",
         "type": "text",
         "max_length": 32,
@@ -249,8 +260,7 @@ SCHEMA: list[dict[str, Any]] = [
         "group": "bypass",
         "label": "合成工具名前缀",
         "desc": "每次请求都会在前缀后拼一段随机串，避免和客户端自己的工具重名。",
-        "depends_on": {"bypassEnabled": [True]},
-        "advanced": True,
+                "advanced": True,
     },
 ]
 
@@ -363,7 +373,14 @@ class RuntimeSettings:
                 raise ValueError(f"未知设置项: {key}")
             validated[str(key)] = _coerce(item, raw)
         with self._lock:
-            self._values.update(validated)
+            # 互斥开关：开一个自动关另一个（bypassEnabled ↔ bypassStreamAntiTruncation）
+            merged = dict(self._values)
+            merged.update(validated)
+            for key, value in validated.items():
+                mutex = SCHEMA_BY_KEY.get(str(key), {}).get("mutex")
+                if mutex and value and merged.get(mutex):
+                    merged[mutex] = False
+            self._values = merged
             self._save()
         log.info("运行期设置已更新: %s", ", ".join(sorted(validated)))
         return self.values()

@@ -321,3 +321,71 @@ async def test_graphql_nonstream_aggregates():
     client = _make_graphql_client(handler)
     out = await client.generate_content(model="m", capture_prompt="p", contents=_contents())
     assert out.text == "第一第二"
+
+
+@pytest.mark.asyncio
+async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypatch):
+    """新开关独立生效（互斥：老开关关着）且带 streamFunctionCallArguments。"""
+    from aistudio_api.application import runtime_settings as settings_module
+
+    values = dict(settings_module.DEFAULTS)
+    values.update({"bypassEnabled": False, "bypassStreamAntiTruncation": True})
+    monkeypatch.setattr(settings_module.runtime_settings, "values", lambda: dict(values))
+    monkeypatch.setattr(
+        settings_module.runtime_settings, "get", lambda key, default=None: values.get(key, default)
+    )
+
+    from aistudio_api.infrastructure.upstreams.common import (
+        ChannelBypassExtractor,
+        maybe_channel_bypass,
+    )
+
+    contents = [AistudioContent(role="user", parts=[AistudioPart(text="写个故事")])]
+    _contents2, _system, plan = maybe_channel_bypass(contents, None)
+    assert plan is not None  # 新开关独立触发注入
+
+    extractor = ChannelBypassExtractor(plan)
+    # partialArgs 增量：两片 + willContinue
+    events = extractor.feed_data(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "name": plan.tool_name,
+                                    "partialArgs": [
+                                        {"jsonPath": "$.content", "stringValue": "第一", "willContinue": True},
+                                        {"jsonPath": "$.content", "stringValue": "段"},
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    assert ("body", "第一段") in events  # 同 chunk 的多片拼成一个增量
+    assert ("body", "第一") not in events or events.count(("body", "第一")) == 0
+    assert extractor.probe_partial_pieces == 2 and extractor.probe_will_continue
+    # 终块带完整 args（累积版）：finish 只补差值
+    extractor.feed_data(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"functionCall": {"name": plan.tool_name, "args": {"content": "第一段尾巴"}}}
+                        ]
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+    )
+    tail_events = extractor.finish_events()
+    assert ("body", "尾巴") in tail_events
+    # 合成调用不外泄为 tool_calls
+    assert all(e[0] != "tool_calls" for e in events + tail_events)

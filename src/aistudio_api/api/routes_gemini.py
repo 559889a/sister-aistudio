@@ -19,9 +19,22 @@ from aistudio_api.infrastructure.utils.request_context import (
 
 from .dependencies import get_client
 from .schemas import GeminiGenerateContentRequest
+from .state import runtime_state
 
 logger = get_logger("routes.gemini")
 router = APIRouter()
+
+
+def _pick_client_and_model(model_path: str, fallback_client):
+    """按前缀选通道（pg/ express/ cookie/），返回 (client, 去前缀模型名)。
+
+    注册表未装配（测试替身走 dependency_overrides）时用注入的客户端原样放行。
+    """
+    registry = runtime_state.upstreams
+    if registry is None:
+        return fallback_client, model_path
+    client, model, _channel = registry.pick(model_path)
+    return client, model
 
 
 @router.post("/v1beta/{model_path:path}:generateContent")
@@ -40,6 +53,7 @@ async def generate_content(
         request_id,
         len(req.contents),
     )
+    client, model_path = _pick_client_and_model(model_path, client)
     try:
         result = await handle_gemini_generate_content(
             model_path, req, client, stream=False
@@ -74,6 +88,7 @@ async def stream_generate_content(
         request_id,
         len(req.contents),
     )
+    client, model_path = _pick_client_and_model(model_path, client)
     return await handle_gemini_generate_content(
         model_path, req, client, stream=True
     )

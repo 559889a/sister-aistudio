@@ -22,6 +22,7 @@ from aistudio_api.api.schemas import (
     GeminiGenerateContentRequest,
     OpenAIChatCompletionRequest,
 )
+from aistudio_api.api.state import runtime_state
 from aistudio_api.application.api_service_gemini import (
     PreparedRequest,
     classify_gemini_error_payload,
@@ -34,7 +35,6 @@ from aistudio_api.application.openai_bridge import (
     format_sse,
     openai_error_payload,
     openai_to_gemini_request,
-    to_openai_model_list,
     to_openai_response,
 )
 from aistudio_api.application.stream_heartbeat import (
@@ -112,6 +112,15 @@ async def chat_completions(
         )
         return JSONResponse(status_code=400, content=openai_error_payload(exc))
 
+    # 前缀选路（pg/ express/ cookie/）：通道定了再把前缀从模型名剥掉
+    # （Gemini 请求体不带模型名，模型只跟着 payload.model 走下游）
+    registry = runtime_state.upstreams
+    if registry is not None:
+        picked, clean_model, _channel = registry.pick(payload.model)
+        if picked is not None:
+            client = picked
+        if clean_model != payload.model:
+            payload = payload.model_copy(update={"model": clean_model})
     if payload.stream:
         return StreamingResponse(
             _stream_openai_chunks(
@@ -263,12 +272,13 @@ async def _stream_openai_chunks(
 async def list_models(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, object]:
-    """复用 /v1beta/models 的同一份模型数据，输出 OpenAI 形状。"""
-    session = runtime_state.client._session if runtime_state.client else None
-    from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+    """本地 models.json（2026-10-20 用户拍板：不走云端动态发现）。
 
-    discovered = await model_discovery.get_models(session=session)
-    payload = to_openai_model_list(discovered)
-    data = payload.get("data")
-    logger.debug("模型列表完成 (共 %d 个)", len(data) if isinstance(data, list) else 0)
+    每个模型展开 base + 三通道 alias（pg/ 无头、express/ 官方 Key、cookie/ 控制台
+    Cookie）；未配置凭据的通道不列。文件可直接编辑，改完即生效（无缓存）。
+    """
+    from aistudio_api.infrastructure.upstreams.registry import local_model_list_payload
+
+    payload = local_model_list_payload(runtime_state.upstreams)
+    logger.debug("本地模型列表完成 (共 %d 个)", len(payload.get("data") or []))
     return payload

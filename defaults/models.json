@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "id": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash",
+      "description": "Latest Gemini 3.8 Flash model"
+    },
+    {
+      "id": "gemini-4-argon",
+      "display_name": "Gemini 4 Argon",
+      "description": "Gemini 4 Argon (diagnostics only; never stress-test)"
+    }
+  ]
+}

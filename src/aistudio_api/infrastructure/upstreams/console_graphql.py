@@ -26,7 +26,13 @@ import httpx
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
+    ChannelBypassExtractor,
+    apply_extractor_nonstream,
+    bypass_tool_config_official,
+    bypass_tools_official,
+    channel_streaming_flag_enabled,
     contents_to_official,
+    maybe_channel_bypass,
     official_chunk_events,
     official_to_model_output,
     wire_safety_to_official,
@@ -35,6 +41,7 @@ from aistudio_api.infrastructure.upstreams.common import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from aistudio_api.application.bypass import BypassPlan
     from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 logger = get_logger("upstreams.console_graphql")
@@ -156,7 +163,12 @@ class ConsoleGraphqlClient:
         top_k: int | None = None,
         max_tokens: int | None = None,
         **_extra: Any,
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], BypassPlan | None]:
+        plan = None
+        if contents:
+            contents, system_instruction_content, plan = maybe_channel_bypass(
+                contents, system_instruction_content
+            )
         variables: dict[str, object] = {
             "contents": contents_to_official(contents),
             "model": self._model_path(model),
@@ -185,17 +197,28 @@ class ConsoleGraphqlClient:
             variables["systemInstruction"] = {
                 "parts": contents_to_official([system_instruction_content])[0]["parts"]
             }
-        official_tools = wire_tools_to_official(tools)
-        if official_tools:
-            variables["tools"] = official_tools
+        if plan is not None:
+            variables["tools"] = bypass_tools_official(plan.tool_name)
+            tool_cfg = bypass_tool_config_official(
+                plan.tool_name, streaming=channel_streaming_flag_enabled()
+            )
+            if tool_cfg:
+                variables["toolConfig"] = tool_cfg
+        else:
+            official_tools = wire_tools_to_official(tools)
+            if official_tools:
+                variables["tools"] = official_tools
         # shortcut: tool_config（wire 形状）未转换，该通道 v1 不支持 tool_choice
         _ = tool_config
-        return {
-            "requestContext": _request_context(self._project_id),
-            "querySignature": STREAM_GENERATE_QUERY_SIGNATURE,
-            "operationName": STREAM_GENERATE_OPERATION_NAME,
-            "variables": variables,
-        }
+        return (
+            {
+                "requestContext": _request_context(self._project_id),
+                "querySignature": STREAM_GENERATE_QUERY_SIGNATURE,
+                "operationName": STREAM_GENERATE_OPERATION_NAME,
+                "variables": variables,
+            },
+            plan,
+        )
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0), proxy=self._proxy_url)
@@ -263,20 +286,28 @@ class ConsoleGraphqlClient:
                     continue
 
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
-        body = self._build_body(model, **params)
+        body, plan = self._build_body(model, **params)
+        extractor = ChannelBypassExtractor(plan) if plan is not None else None
         aggregated: dict[str, Any] = {"candidates": []}
         texts: list[str] = []
         async for data in self._stream_data(body):
-            for event, payload in official_chunk_events(data):
+            events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
+            for event, payload in events:
                 if event == "body":
                     texts.append(str(payload))
                 elif event == "usage":
                     aggregated["usageMetadata"] = payload
+        if extractor is not None:
+            for event, payload in extractor.finish_events():
+                if event == "body" and isinstance(payload, str):
+                    texts.append(payload)
         if texts:
             aggregated["candidates"] = [
                 {"content": {"parts": [{"text": "".join(texts)}]}, "finishReason": "STOP"}
             ]
         output = official_to_model_output(aggregated, model)
+        if extractor is not None:
+            apply_extractor_nonstream(output, extractor)
         if not output.text and not output.candidates[0].function_calls:
             raise RequestError(502, "console_graphql 上游未返回任何内容")
         return output
@@ -284,10 +315,15 @@ class ConsoleGraphqlClient:
     async def stream_generate_content(
         self, *, model: str, **params: Any
     ) -> AsyncIterator[tuple[str, object]]:
-        body = self._build_body(model, **params)
+        body, plan = self._build_body(model, **params)
+        extractor = ChannelBypassExtractor(plan) if plan is not None else None
         yield ("status", 200)
         async for data in self._stream_data(body):
-            for event in official_chunk_events(data):
+            events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
+            for event in events:
+                yield event
+        if extractor is not None:
+            for event in extractor.finish_events():
                 yield event
         yield ("done", None)
 

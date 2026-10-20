@@ -19,6 +19,7 @@ from aistudio_api.infrastructure.gateway.wire_spec import SchemaIndex
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from aistudio_api.application.bypass import BypassPlan
     from aistudio_api.infrastructure.gateway.wire_types import (
         AistudioContent,
         AistudioPart,
@@ -288,3 +289,184 @@ async def stream_official_events(
         for event in official_chunk_events(data):
             yield event
     yield ("done", None)
+
+
+# ── 工具调用 bypass（跨通道版，2026-10-20）──────────────────────────────
+# 提示词注入位置/文案/老 bypass 语义全部复用 application/bypass.py 与 runtime
+# settings（用户拍板：「这俩东西逻辑差不多，提示词注入位置和提示词都走我们自己
+# 项目的」）。新增的是 express/cookie 通道的 streamFunctionCallArguments 开关 +
+# partialArgs 增量提取——合成工具的参数逐片流式到达，bypass 也能真流式。
+
+
+def maybe_channel_bypass(
+    contents: list[AistudioContent],
+    system_instruction_content: AistudioContent | None,
+) -> tuple[list[AistudioContent], AistudioContent | None, BypassPlan | None]:
+    """bypass 开启时对 contents 应用我们自己的注入机器；返回 (contents, system, plan)。
+
+    plan 为 None 表示 bypass 未开启（原样返回）。**就地改写**与浏览器通道
+    （capture.py）同一份 apply_bypass，行为按构造对齐。
+    """
+    from aistudio_api.application.bypass import apply_bypass
+    from aistudio_api.application.runtime_settings import runtime_settings
+
+    # 新老开关互斥但共用这套注入机器：任一开启即注入（浏览器通道的老 bypass
+    # 仍只认 bypassEnabled；express/cookie 通道两个开关都走这里）
+    if not (runtime_settings.get("bypassEnabled") or runtime_settings.get("bypassStreamAntiTruncation")):
+        return contents, system_instruction_content, None
+    plan = apply_bypass(
+        contents,
+        system_instruction=system_instruction_content,
+        tool_prefix=str(runtime_settings.get("bypassToolPrefix") or ""),
+        instruction_template=str(runtime_settings.get("bypassInstruction") or ""),
+        position=str(runtime_settings.get("bypassInstructionPosition") or "tail"),
+        mode=str(runtime_settings.get("bypassMode") or "prefer"),
+        merge_outside=bool(runtime_settings.get("bypassMergeOutside")),
+    )
+    return contents, plan.system_instruction, plan
+
+
+def bypass_tools_official(tool_name: str) -> list[dict[str, object]]:
+    """合成工具声明（官方形状）；与浏览器通道一致：客户端工具整个换掉。"""
+    from aistudio_api.application.bypass import build_declaration
+
+    return [{"functionDeclarations": [build_declaration(tool_name)]}]
+
+
+def bypass_tool_config_official(tool_name: str, *, streaming: bool) -> dict[str, object]:
+    """官方 ToolConfig：required 模式强制 ANY+白名单；实验开关加流式参数。
+
+    streamFunctionCallArguments 是 Gemini 3+ 的 Preview 能力（vertex-at 研究证实
+    官方 API 支持）：开了之后 functionCall 以 partialArgs{jsonPath,stringValue,
+    willContinue} 逐片到达——这就是「实验性工具调用流式抗截断」的机制本体。
+    """
+    config: dict[str, object] = {}
+    from aistudio_api.application.runtime_settings import runtime_settings
+
+    required = str(runtime_settings.get("bypassMode") or "prefer") == "required"
+    if required:
+        config = {"mode": "ANY", "allowedFunctionNames": [tool_name]}
+    if streaming:
+        config["streamFunctionCallArguments"] = True
+    return {"functionCallingConfig": config} if config else {}
+
+
+def channel_streaming_flag_enabled() -> bool:
+    from aistudio_api.application.runtime_settings import runtime_settings
+
+    return bool(runtime_settings.get("bypassStreamAntiTruncation"))
+
+
+class ChannelBypassExtractor:
+    """官方 chunk → 客户端事件：合成工具的 args/partialArgs → 正文（带探针）。
+
+    探针目的（用户 2026-10-20）：debug 与改进——万一哪个上游真吐了增量参数，
+    日志会立刻告诉我们（片数 / willContinue / 最终 args 与已流式部分的关系），
+    拿这个现场去做适配。
+    """
+
+    def __init__(self, plan: BypassPlan) -> None:
+        self.tool_name = plan.tool_name
+        self.mode = plan.mode
+        self.streaming = channel_streaming_flag_enabled()
+        # 探针计数
+        self.probe_partial_pieces = 0
+        self.probe_will_continue = False
+        self.probe_unknown_paths: set[str] = set()
+        self.streamed = ""  # 已按 partialArgs 流出去的正文
+        self.complete_args_content: str | None = None
+        self.saw_call = False
+
+    def feed_data(self, data: dict) -> list[tuple[str, object]]:
+        events: list[tuple[str, object]] = []
+        partial_text = ""
+        for candidate in data.get("candidates") or []:
+            for part in (candidate.get("content") or {}).get("parts") or []:
+                if not isinstance(part, dict):
+                    continue
+                fc = part.get("functionCall")
+                if not (isinstance(fc, dict) and str(fc.get("name") or "") == self.tool_name):
+                    continue
+                self.saw_call = True
+                for piece in fc.get("partialArgs") or []:
+                    if not isinstance(piece, dict):
+                        continue
+                    path = str(piece.get("jsonPath") or "")
+                    value = piece.get("stringValue")
+                    if path == "$.content" and isinstance(value, str):
+                        partial_text += value
+                        self.probe_partial_pieces += 1
+                        if piece.get("willContinue"):
+                            self.probe_will_continue = True
+                    elif path:
+                        self.probe_unknown_paths.add(path)
+                args = fc.get("args")
+                if isinstance(args, dict) and isinstance(args.get("content"), str):
+                    self.complete_args_content = str(args["content"])
+        for event, payload in official_chunk_events(data):
+            if event == "tool_calls" and isinstance(payload, list):
+                others = [c for c in payload if isinstance(c, dict) and str(c.get("name") or "") != self.tool_name]
+                if others:
+                    events.append(("tool_calls", others))
+                continue
+            events.append((event, payload))
+        if partial_text:
+            self.streamed += partial_text
+            events.append(("body", partial_text))
+        return events
+
+    def finish_events(self) -> list[tuple[str, object]]:
+        """流收尾：整块 args 与已流式部分的差值补齐（collapse 语义）+ 探针报告。"""
+        from aistudio_api.application.bypass import (
+            assess_completion,
+            collapse_cumulative,
+        )
+
+        events: list[tuple[str, object]] = []
+        if self.streaming:
+            if self.probe_partial_pieces:
+                logger.info(
+                    "[流式抗截断探针] 合成工具参数增量到达: pieces=%d willContinue=%s unknown_paths=%s streamed=%d chars",
+                    self.probe_partial_pieces,
+                    self.probe_will_continue,
+                    sorted(self.probe_unknown_paths) or "-",
+                    len(self.streamed),
+                )
+            else:
+                logger.warning(
+                    "[流式抗截断探针] 开关已开但整条流没见到 partialArgs（上游未生效或整块投递），本次按整块语义交付"
+                )
+        if self.complete_args_content is not None:
+            tail, self.streamed = collapse_cumulative(self.complete_args_content, self.streamed)
+            if tail:
+                events.append(("body", tail))
+            verdict = assess_completion(self.streamed)
+            if not verdict.complete:
+                logger.warning("[流式抗截断探针] 输出可能不完整（%s），已按现有内容交付", verdict.reason)
+        elif self.mode == "required" and not self.saw_call:
+            from aistudio_api.application.bypass import BYPASS_MISS_MESSAGE
+            from aistudio_api.domain.errors import RequestError
+
+            raise RequestError(502, BYPASS_MISS_MESSAGE)
+        return events
+
+
+def apply_extractor_nonstream(output, extractor: ChannelBypassExtractor) -> None:
+    """非流式：从完整响应里取合成工具 args 当正文（required 未命中照旧 502）。"""
+    candidate = output.candidates[0] if output.candidates else None
+    if candidate is None:
+        return
+    synthetic = [
+        c for c in candidate.function_calls if str(c.get("name") or "") == extractor.tool_name
+    ]
+    candidate.function_calls = [
+        c for c in candidate.function_calls if str(c.get("name") or "") != extractor.tool_name
+    ]
+    extractor.saw_call = bool(synthetic)
+    for call in synthetic:
+        args = call.get("args") or {}
+        if isinstance(args.get("content"), str):
+            extractor.complete_args_content = str(args["content"])
+    for event, payload in extractor.finish_events():
+        if event == "body" and isinstance(payload, str):
+            candidate.text = (candidate.text or "") + payload

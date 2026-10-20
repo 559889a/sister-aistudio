@@ -13,9 +13,13 @@ from typing import TYPE_CHECKING, Any
 
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
+    ChannelBypassExtractor,
+    bypass_tool_config_official,
+    bypass_tools_official,
+    channel_streaming_flag_enabled,
     contents_to_official,
+    maybe_channel_bypass,
     official_to_model_output,
-    stream_official_events,
     upstream_http_error,
     wire_safety_to_official,
     wire_tools_to_official,
@@ -23,6 +27,7 @@ from aistudio_api.infrastructure.upstreams.common import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from aistudio_api.application.bypass import BypassPlan
     from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 
 logger = get_logger("upstreams.vertex_express")
@@ -120,11 +125,20 @@ class VertexExpressClient:
         _ = tool_config
         return config
 
-    def _call_kwargs(self, model: str, **params: Any) -> dict[str, Any]:
+    def _call_kwargs(
+        self, model: str, **params: Any
+    ) -> tuple[dict[str, Any], BypassPlan | None]:
+        """(SDK 调用参数, bypass plan|None)。plan 本地传递，避免并发请求踩状态。"""
         contents: list[AistudioContent] | None = params.get("contents")
+        system_instruction_content = params.get("system_instruction_content")
+        plan = None
+        if contents:
+            contents, system_instruction_content, plan = maybe_channel_bypass(
+                contents, system_instruction_content
+            )
         config = self._build_config(
-            system_instruction_content=params.get("system_instruction_content"),
-            tools=params.get("tools"),
+            system_instruction_content=system_instruction_content,
+            tools=params.get("tools") if plan is None else None,
             tool_config=params.get("tool_config"),
             safety_settings=params.get("safety_settings"),
             temperature=params.get("temperature"),
@@ -132,42 +146,77 @@ class VertexExpressClient:
             top_k=params.get("top_k"),
             max_tokens=params.get("max_tokens"),
         )
-        return {
-            "model": self._model_path(model),
-            "contents": contents_to_official(contents),
-            "config": config or None,
-        }
+        if plan is not None:
+            config["tools"] = bypass_tools_official(plan.tool_name)
+            tool_cfg = bypass_tool_config_official(
+                plan.tool_name, streaming=channel_streaming_flag_enabled()
+            )
+            if tool_cfg:
+                config["tool_config"] = tool_cfg
+        return (
+            {
+                "model": self._model_path(model),
+                "contents": contents_to_official(contents),
+                "config": config or None,
+            },
+            plan,
+        )
+
+    def _dump(self, chunk) -> dict:
+        data = chunk.model_dump(mode="json", by_alias=True, exclude_none=True)
+        for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
+            data.pop(k, None)
+        return data
 
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
         from google.genai import errors as genai_errors
 
-        kwargs = self._call_kwargs(model, **params)
+        kwargs, plan = self._call_kwargs(model, **params)
         try:
             resp = await self._client.aio.models.generate_content(**kwargs)
         except genai_errors.APIError as exc:
-            raise upstream_http_error(int(getattr(exc, "code", 0) or 0), str(getattr(exc, "message", "") or exc)) from exc
-        data = resp.model_dump(mode="json", by_alias=True, exclude_none=True)
-        for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
-            data.pop(k, None)
-        return official_to_model_output(data, model)
+            raise upstream_http_error(
+                int(getattr(exc, "code", 0) or 0),
+                str(getattr(exc, "message", "") or exc),
+            ) from exc
+        data = self._dump(resp)
+        output = official_to_model_output(data, model)
+        if plan is not None:
+            from aistudio_api.infrastructure.upstreams.common import (
+                apply_extractor_nonstream,
+            )
+
+            apply_extractor_nonstream(output, ChannelBypassExtractor(plan))
+        return output
 
     async def stream_generate_content(
         self, *, model: str, **params: Any
     ) -> AsyncIterator[tuple[str, object]]:
         from google.genai import errors as genai_errors
 
-        kwargs = self._call_kwargs(model, **params)
+        kwargs, plan = self._call_kwargs(model, **params)
+        extractor = ChannelBypassExtractor(plan) if plan is not None else None
         try:
             stream = await self._client.aio.models.generate_content_stream(**kwargs)
+            yield ("status", 200)
+            async for chunk in stream:
+                data = self._dump(chunk)
+                if extractor is not None:
+                    for event in extractor.feed_data(data):
+                        yield event
+                else:
+                    from aistudio_api.infrastructure.upstreams.common import (
+                        official_chunk_events,
+                    )
 
-            async def _chunks() -> AsyncIterator[dict]:
-                async for chunk in stream:
-                    data = chunk.model_dump(mode="json", by_alias=True, exclude_none=True)
-                    for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
-                        data.pop(k, None)
-                    yield data
-
-            async for event in stream_official_events(_chunks()):
-                yield event
+                    for event in official_chunk_events(data):
+                        yield event
+            if extractor is not None:
+                for event in extractor.finish_events():
+                    yield event
+            yield ("done", None)
         except genai_errors.APIError as exc:
-            raise upstream_http_error(int(getattr(exc, "code", 0) or 0), str(getattr(exc, "message", "") or exc)) from exc
+            raise upstream_http_error(
+                int(getattr(exc, "code", 0) or 0),
+                str(getattr(exc, "message", "") or exc),
+            ) from exc
