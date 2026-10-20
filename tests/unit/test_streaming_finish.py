@@ -97,3 +97,25 @@ async def test_truncated_stream_without_any_body_still_terminates():
     assert ("done", None) in events
     body = "".join(str(payload) for kind, payload in events if kind == "body")
     assert body == ""
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_22_continuing_does_not_break_stream():
+    """finishReason 22=「继续中」是非终止码：流里出现后必须继续吃后续 chunk。"""
+    text = (
+        ")]}'\n"
+        + json.dumps(
+            [
+                [
+                    _make_chunk([_wire_text("第一段")], finish=22),
+                    _make_chunk([_wire_text("第二段")]),
+                    _make_chunk([_wire_text("第三段")], finish=1),
+                ]
+            ]
+        )
+    )
+    events = await _run_gateway(text)
+    body = "".join(t for etype, t in events if etype == "body")
+    assert body == "第一段第二段第三段"
+    finish = [t for etype, t in events if etype == "finish_reason"]
+    assert finish == [1]

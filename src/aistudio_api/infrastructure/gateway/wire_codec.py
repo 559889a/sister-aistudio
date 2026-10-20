@@ -158,7 +158,7 @@ class AistudioWireCodec:
     EVERGREEN_MODEL_URI_INDEX = TopLevelIndex.EVERGREEN_MODEL_URI
     REQUEST_FLAG_INDEX = TopLevelIndex.REQUEST_FLAG
     SESSION_TOKEN_INDEX = TopLevelIndex.SESSION_TOKEN
-    TIMEZONE_INDEX = TopLevelIndex.LOCATION
+    TIMEZONE_INDEX = TopLevelIndex.REQUEST_CONTEXT
 
     def decode(self, raw_body: str) -> AistudioRequest:
         parsed = json.loads(raw_body)

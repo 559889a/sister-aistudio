@@ -26,6 +26,9 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
     parse_response_chunk,
     parse_response_part,
 )
+from aistudio_api.infrastructure.gateway.wire_spec import (
+    WIRE_FINISH_REASON_CONTINUING,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("streaming")
@@ -131,7 +134,10 @@ class StreamingGateway:
                 latest_response_id = parsed_chunk[7]
                 yield ("response_id", latest_response_id)
             candidate = parse_response_chunk(parsed_chunk)
-            if candidate.finish_reason is not None:
+            if (
+                candidate.finish_reason is not None
+                and candidate.finish_reason != WIRE_FINISH_REASON_CONTINUING
+            ):
                 latest_finish_reason = candidate.finish_reason
             body_delta = ""
             if extractor is not None:

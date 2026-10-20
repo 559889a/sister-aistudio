@@ -25,8 +25,11 @@ class TopLevelIndex(IntEnum):
     # field12：会话/续接 token（真机 body 为 "v1_…"），**不是** cachedContent；
     # 往这里写别的东西会顶掉页面的续接上下文（2026-10-20 bundle 复核）
     SESSION_TOKEN = 11
-    # field14：含时区信息的工具/位置配置；按真机 body 原样回写 [[null,null,"<TZ>"]]
-    LOCATION = 13
+    # field14：RequestContext（YVa{1:XVa{2:?,3:timeZone}, 3:工具动作bool}）——
+    # 客户端上下文（时区 + 工具动作标志），**不是**官方 ToolConfig（2026-10-20
+    # wire 全图更正，逆向相关内容/vertex-at-feasibility-and-wire-full-map §3）；
+    # 按真机 body 原样回写 [[null,null,"<TZ>"]]
+    REQUEST_CONTEXT = 13
     # field17 (idx16)：长输出续页 continuationToken（页面 _.hr(x,17,token)，见
     # 逆向相关内容/incident-static-evidence-2026-10-20.md A-4）——与 field12 的
     # 会话 token 是两个字段；服务端截断且不给 token 时页面只能报错，与我们无关。
@@ -140,3 +143,9 @@ class JspbArray(list):
         while res and res[-1] is None:
             res.pop()
         return res
+
+
+# finishReason 22 =「继续中」：页面把它当非终止（B1:3228 `_.Pj(fi,2)!==22` 门控
+# 收尾逻辑），配套 candidate field9(idx8)=continuationToken 做续页（我们不续页——
+# 2026-10-20 拍板不做多块拼接；流式消费时见 22 继续吃后续 chunk，别提前断流）。
+WIRE_FINISH_REASON_CONTINUING = 22
