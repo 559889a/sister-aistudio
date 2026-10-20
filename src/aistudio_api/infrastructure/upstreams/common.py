@@ -385,9 +385,17 @@ class ChannelBypassExtractor:
                 if not isinstance(part, dict):
                     continue
                 fc = part.get("functionCall")
-                if not (isinstance(fc, dict) and str(fc.get("name") or "") == self.tool_name):
+                if not isinstance(fc, dict):
                     continue
-                self.saw_call = True
+                fc_name = str(fc.get("name") or "")
+                # 增量续片不重复带工具名（express 实测 2026-10-20：chunk1 带 name 开场，
+                # 其后只有 partialArgs）——开场认过名后，无名的续片都归它
+                if fc_name == self.tool_name:
+                    self.saw_call = True
+                elif fc_name or not self.saw_call:
+                    continue
+                if fc.get("willContinue"):
+                    self.probe_will_continue = True
                 for piece in fc.get("partialArgs") or []:
                     if not isinstance(piece, dict):
                         continue

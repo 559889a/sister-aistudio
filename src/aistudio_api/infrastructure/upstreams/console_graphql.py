@@ -105,6 +105,48 @@ def _request_context(project_id: str) -> dict[str, object]:
     }
 
 
+_UI_SCHEMA_TYPES = {
+    "object": "OBJECT", "array": "ARRAY", "string": "STRING",
+    "integer": "INTEGER", "number": "NUMBER", "boolean": "BOOLEAN", "null": "NULL",
+}
+
+
+def _ui_schema(schema: object) -> object:
+    """官方 JSON Schema → batchGraphql 期望的形状（properties 转 [{key,value}]）。
+
+    实测（2026-10-20）：直接给官方形状会 400
+    ``Schema.PropertiesEntry.key is null``——protobuf map 语义必须键值对列表。
+    """
+    if not isinstance(schema, dict):
+        return schema
+    out: dict[str, object] = {}
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        non_null = [t for t in raw_type if str(t).lower() != "null"]
+        raw_type = non_null[0] if non_null else "null"
+        if len(non_null) != len(schema.get("type") or []):
+            out["nullable"] = True
+    if not raw_type:
+        if isinstance(schema.get("properties"), dict):
+            raw_type = "object"
+        elif "items" in schema:
+            raw_type = "array"
+    if raw_type:
+        out["type"] = _UI_SCHEMA_TYPES.get(str(raw_type).lower(), str(raw_type).upper())
+    for key, value in schema.items():
+        if key == "type":
+            continue
+        if key == "properties" and isinstance(value, dict):
+            out[key] = [{"key": name, "value": _ui_schema(child)} for name, child in value.items()]
+        elif key in {"items", "additionalProperties", "not"} and isinstance(value, dict):
+            out[key] = _ui_schema(value)
+        elif key in {"oneOf", "anyOf", "allOf", "prefixItems"} and isinstance(value, list):
+            out[key] = [_ui_schema(item) for item in value]
+        else:
+            out[key] = value
+    return out
+
+
 class ConsoleGraphqlClient:
     """AIStudioClient 调用面的 Console Cookie 直连实现。"""
 
@@ -198,7 +240,11 @@ class ConsoleGraphqlClient:
                 "parts": contents_to_official([system_instruction_content])[0]["parts"]
             }
         if plan is not None:
-            variables["tools"] = bypass_tools_official(plan.tool_name)
+            tools_official = bypass_tools_official(plan.tool_name)
+            for decl in tools_official[0]["functionDeclarations"]:
+                if isinstance(decl.get("parameters"), dict):
+                    decl["parameters"] = _ui_schema(decl["parameters"])
+            variables["tools"] = tools_official
             tool_cfg = bypass_tool_config_official(
                 plan.tool_name, streaming=channel_streaming_flag_enabled()
             )

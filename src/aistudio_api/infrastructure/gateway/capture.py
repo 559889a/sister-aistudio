@@ -24,6 +24,7 @@ from aistudio_api.config import DEFAULT_TEXT_MODEL
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.signatures import apply_signature_sentinels
+from aistudio_api.infrastructure.upstreams.common import channel_streaming_flag_enabled
 from aistudio_api.infrastructure.gateway.wire_codec import modify_body
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -140,7 +141,11 @@ class RequestCaptureService:
                 if prefill_text:
                     logger.info("预填充兼容: %d 字", len(prefill_text))
 
-            if bypass_enabled() and not resolve_model_defaults(model).is_image_model:
+            # 新老开关互斥但共用浏览器通道的注入机器（2026-10-20）：实验性流式
+            # 抗截断开着时也走同一套 bypass 注入，wire_codec 会额外注入探测开关
+            if (
+                bypass_enabled() or channel_streaming_flag_enabled()
+            ) and not resolve_model_defaults(model).is_image_model:
                 instruction_position = str(
                     runtime_settings.get("bypassInstructionPosition") or "tail"
                 )

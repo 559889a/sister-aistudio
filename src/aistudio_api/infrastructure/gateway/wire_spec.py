@@ -30,6 +30,10 @@ class TopLevelIndex(IntEnum):
     # wire 全图更正，逆向相关内容/vertex-at-feasibility-and-wire-full-map §3）；
     # 按真机 body 原样回写 [[null,null,"<TZ>"]]
     REQUEST_CONTEXT = 13
+    # 运行期探针实测（2026-10-20，4 发 400 同报「Unexpected list for single
+    # non-message field」）：field8/9/10/13（idx7/8/9/12）全部是**标量单值字段**，
+    # 顶层没有任何可放 toolConfig 的消息槽位——AI Studio wire 不支持
+    # streamFunctionCallArguments，pg 通道的流式抗截断到此为止（探针保留）。
     # field17 (idx16)：长输出续页 continuationToken（页面 _.hr(x,17,token)，见
     # 逆向相关内容/incident-static-evidence-2026-10-20.md A-4）——与 field12 的
     # 会话 token 是两个字段；服务端截断且不给 token 时页面只能报错，与我们无关。

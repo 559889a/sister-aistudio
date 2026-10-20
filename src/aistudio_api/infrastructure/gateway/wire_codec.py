@@ -238,12 +238,19 @@ class AistudioWireCodec:
                 channel_streaming_flag_enabled,
             )
 
-            if channel_streaming_flag_enabled():
-                import os
+            # 实测 field10(idx9) 是标量：塞消息形状直接 400「Unexpected list for
+            # single non-message field」。注入默认关（防全线 400），只留 env 探针
+            # 通道给后续实验（AISTUDIO_WIRE_TOOLCONFIG_PROBE=1 + 可调 IDX）。
+            import os
 
+            if channel_streaming_flag_enabled() and os.getenv(
+                "AISTUDIO_WIRE_TOOLCONFIG_PROBE", ""
+            ) in ("1", "true", "yes"):
                 probe_idx = int(os.getenv("AISTUDIO_WIRE_TOOLCONFIG_IDX", "9"))
                 self._ensure_len(body, probe_idx + 1)
-                body[probe_idx] = [[1, None, True]]  # [mode=AUTO, allowed, streamArgs]
+                # field10 实测是 single message（400: Unexpected list for single
+                # non-message field）——按单消息形状下注：f1=mode AUTO, f3=streamArgs
+                body[probe_idx] = [1, None, True]
                 logger.info(
                     "[流式抗截断探针] pg 通道已在顶层 idx%d 注入 toolConfig 开关（赌服务端映射）",
                     probe_idx,
