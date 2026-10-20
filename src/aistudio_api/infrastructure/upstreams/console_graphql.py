@@ -342,7 +342,7 @@ class ConsoleGraphqlClient:
 
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
         body, plan = self._build_body(model, **params)
-        extractor = ChannelBypassExtractor(plan) if plan is not None else None
+        extractor = ChannelBypassExtractor(plan, streaming=False) if plan is not None else None
         probe = new_stream_probe("console_graphql", model)
         aggregated: dict[str, Any] = {"candidates": []}
         texts: list[str] = []
@@ -383,7 +383,7 @@ class ConsoleGraphqlClient:
         self, *, model: str, **params: Any
     ) -> AsyncIterator[tuple[str, object]]:
         body, plan = self._build_body(model, **params)
-        extractor = ChannelBypassExtractor(plan) if plan is not None else None
+        extractor = ChannelBypassExtractor(plan, streaming=False) if plan is not None else None
         probe = new_stream_probe("console_graphql", model)
         from aistudio_api.infrastructure.upstreams.common import touch_stream_probe
 

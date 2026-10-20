@@ -368,10 +368,14 @@ class ChannelBypassExtractor:
     拿这个现场去做适配。
     """
 
-    def __init__(self, plan: BypassPlan) -> None:
+    def __init__(self, plan: BypassPlan, *, streaming: bool | None = None) -> None:
         self.tool_name = plan.tool_name
         self.mode = plan.mode
-        self.streaming = channel_streaming_flag_enabled()
+        # None=按开关（express 通道）；cookie/pg 走老版本显式传 False，探针不误报
+        self.streaming = (
+            channel_streaming_flag_enabled() if streaming is None else streaming
+        )
+        self._finish_consumed = False
         # 探针计数
         self.probe_partial_pieces = 0
         self.probe_will_continue = False
@@ -434,6 +438,9 @@ class ChannelBypassExtractor:
         )
 
         events: list[tuple[str, object]] = []
+        if self._finish_consumed:
+            return events
+        self._finish_consumed = True
         if self.streaming:
             if self.probe_partial_pieces:
                 logger.info(
