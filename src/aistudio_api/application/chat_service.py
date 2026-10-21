@@ -487,62 +487,12 @@ def _drop_covered_builtin_tools(names: list[str], seen: set[str]) -> list[str]:
     return result
 
 
-_GEMINI_SAFETY_CATEGORY_MAP = {
-    "HARM_CATEGORY_HARASSMENT": 7,
-    "HARM_CATEGORY_HATE_SPEECH": 8,
-    "HARM_CATEGORY_SEXUALLY_EXPLICIT": 9,
-    "HARM_CATEGORY_DANGEROUS_CONTENT": 10,
-}
-
-_GEMINI_SAFETY_THRESHOLD_MAP = {
-    "BLOCK_LOW_AND_ABOVE": 1,
-    "BLOCK_MEDIUM_AND_ABOVE": 2,
-    "BLOCK_ONLY_HIGH": 3,
-    "BLOCK_NONE": 4,
-    "OFF": 5,
-}
-
-
-def _normalize_gemini_safety_settings(
-    value: object, *, drop_unsupported: bool = True
-) -> list[list[object]]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        if drop_unsupported:
-            return []
-        raise ValueError("safetySettings must be a list")
-
-    normalized: list[list[object]] = []
-    for item in value:
-        raw_cat = (
-            getattr(item, "category", None)
-            if hasattr(item, "category")
-            else (item.get("category") if isinstance(item, dict) else None)
-        )
-        raw_thresh = (
-            getattr(item, "threshold", None)
-            if hasattr(item, "threshold")
-            else (item.get("threshold") if isinstance(item, dict) else None)
-        )
-
-        if raw_cat is None or raw_thresh is None:
-            if drop_unsupported:
-                continue
-            raise ValueError(f"Unsupported safety setting entry: {item!r}")
-
-        category = _GEMINI_SAFETY_CATEGORY_MAP.get(str(raw_cat).strip().upper())
-        if category is None:
-            if drop_unsupported:
-                continue
-            raise ValueError(f"Unsupported safety category: {raw_cat}")
-        threshold = _GEMINI_SAFETY_THRESHOLD_MAP.get(str(raw_thresh).strip().upper())
-        if threshold is None:
-            if drop_unsupported:
-                continue
-            raise ValueError(f"Unsupported safety threshold: {raw_thresh}")
-        normalized.append([None, None, category, threshold])
-    return normalized
+# 四类安全阈值一律 OFF（wire 类别 7/8/9/10=骚扰/仇恨/色情/危险，阈值 5=OFF）。
+# 2026-10-21 拍板：三条通道（pg/express/cookie）必须全关，客户端传的
+# safetySettings 一律忽略，在此层强制替换。
+_FORCED_SAFETY_OFF: list[list[object]] = [
+    [None, None, cat, 5] for cat in (7, 8, 9, 10)
+]
 
 
 def normalize_gemini_request(
@@ -839,12 +789,7 @@ def normalize_gemini_request(
         system_instruction=system_instruction,
         tools=tools if tools is not None else None,
         tool_config=tool_config,
-        safety_settings=_normalize_gemini_safety_settings(
-            req.safetySettings,
-            drop_unsupported=model_defaults.drop_unsupported_params,
-        )
-        if req.safetySettings is not None
-        else None,
+        safety_settings=_FORCED_SAFETY_OFF,
         capture_prompt=capture_prompt,
         capture_images=capture_images or None,
         temperature=generation_config.temperature if generation_config else None,

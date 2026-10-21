@@ -16,10 +16,5 @@ model_defaults:
       - gemini-
     default_tools:
     - google_search
-    safety_settings:
-      Harassment: 5
-      Hate: 5
-      Sexually Explicit: 5
-      Dangerous Content: 5
     drop_unsupported_params: true
   models: {}

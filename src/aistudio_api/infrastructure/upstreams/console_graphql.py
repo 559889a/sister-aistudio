@@ -229,16 +229,9 @@ class ConsoleGraphqlClient:
             "contents": contents_to_official(contents),
             "model": self._model_path(model),
             "generationConfig": {},
-            "safetySettings": wire_safety_to_official(safety_settings) or [
-                {"category": c, "threshold": "OFF"}
-                for c in (
-                    "HARM_CATEGORY_HATE_SPEECH",
-                    "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "HARM_CATEGORY_HARASSMENT",
-                    "HARM_CATEGORY_JAILBREAK",
-                )
-            ],
+            # 四类由网关 normalize 层强制 OFF；JAILBREAK 仅控制台面存在，永远兜底 OFF
+            "safetySettings": wire_safety_to_official(safety_settings)
+            + [{"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"}],
         }
         gen_config: dict[str, object] = variables["generationConfig"]  # type: ignore[assignment]
         if temperature is not None:

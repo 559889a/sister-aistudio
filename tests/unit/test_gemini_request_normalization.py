@@ -320,15 +320,16 @@ def test_normalize_gemini_request_maps_official_text_model_fields():
     assert normalized.generation_config_overrides == {
         "thinking_config": [1, None, None, 3],
     }
+    # 客户端四类混合阈值被强制替换为全 OFF（2026-10-21 拍板：三通道一律全关）
     assert normalized.safety_settings == [
-        [None, None, 7, 1],
-        [None, None, 8, 4],
-        [None, None, 9, 3],
-        [None, None, 10, 2],
+        [None, None, 7, 5],
+        [None, None, 8, 5],
+        [None, None, 9, 5],
+        [None, None, 10, 5],
     ]
 
 
-def test_normalize_gemini_request_drops_unknown_safety_category_when_enabled(
+def test_normalize_gemini_request_ignores_unknown_client_safety_category(
     monkeypatch, tmp_path
 ):
     config_path = tmp_path / "config.yaml"
@@ -367,11 +368,17 @@ model_defaults:
     )
 
     normalized = normalize_gemini_request(req, "models/gemini-2.5-flash")
-    assert normalized.safety_settings == [[None, None, 7, 4]]
+    # 未知类别静默忽略；已知类别也不再沿用客户端阈值，一律强制 OFF
+    assert normalized.safety_settings == [
+        [None, None, 7, 5],
+        [None, None, 8, 5],
+        [None, None, 9, 5],
+        [None, None, 10, 5],
+    ]
     invalidate_config_cache()
 
 
-def test_normalize_gemini_request_rejects_unknown_safety_category_when_disabled(
+def test_normalize_gemini_request_never_raises_on_bad_client_safety_settings(
     monkeypatch, tmp_path
 ):
     config_path = tmp_path / "config.yaml"
@@ -405,8 +412,14 @@ model_defaults:
         }
     )
 
-    with pytest.raises(ValueError, match="Unsupported safety category"):
-        normalize_gemini_request(req, "models/gemini-2.5-flash")
+    # safetySettings 整体被忽略（强制全关策略），畸形输入不再抛错
+    normalized = normalize_gemini_request(req, "models/gemini-2.5-flash")
+    assert normalized.safety_settings == [
+        [None, None, 7, 5],
+        [None, None, 8, 5],
+        [None, None, 9, 5],
+        [None, None, 10, 5],
+    ]
     invalidate_config_cache()
 
 

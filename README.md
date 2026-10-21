@@ -32,7 +32,8 @@ Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 N
 | **签名哨兵** | 发往上游的思考签名 / 工具签名默认换成官方逃生口 `skip_thought_signature_validator`，避免上游「校验后替换内容」导致的死循环 |
 | **流式可靠性与心跳** | 没有任何「生成等待时长」看门狗，长回答不会被网关掐断；流式响应每 1 秒一条 SSE 心跳（OpenAI 空 delta chunk / Gemini `: ping`），bypass 首块前的长静默不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文 |
 | **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 档位 / 采样参数 / max_tokens）、预填充兼容（含思维链闭合守卫）、bypass 开关，落在 `data/settings.json`，改完立即生效、无需重启 |
-| **下游参数容错** | 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
+| **安全过滤强制全关** | 三条通道（pg / express / cookie）四类 Harm 阈值一律注入 `OFF`，客户端传的 `safetySettings` 一律忽略；cookie 通道另对 JAILBREAK 类兜底 `OFF`。注：输入侧预审（生成前拒答）是服务端独立硬过滤，阈值关不掉 |
+| **下游参数容错** | 自动丢弃下游传入的不兼容工具与非标准参数，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
 | **运行状态持久化** | 模型调用量与 Token 统计（`stats.json`）、账号 429 冷却状态（`rotator_state.json`）自动落盘，重启不丢 |
 | **Web 管理面板** | 仪表盘（请求量 / 成功率 / 429 指标）、账号管理（文本与 JSON 批量导入）、系统设置与运行期设置 |
@@ -280,7 +281,7 @@ Python 侧：
 
 ```bash
 uv run ruff check .               # Lint
-uv run pytest                     # 单元测试（基线 533 passed / 0 failed）
+uv run pytest                     # 单元测试（基线 564 passed / 0 failed）
 ```
 
 > 开发规范与交接状态见 [AGENT.md](./AGENT.md)。改完代码需重启 `start.ps1` 才生效。
