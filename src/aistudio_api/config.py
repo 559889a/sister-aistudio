@@ -179,7 +179,7 @@ def discover_proxy_url() -> str | None:
     # 尝试自动探测本地代理（如本机跑着的 Clash / v2ray）
     import socket
 
-    for port in (7890, 10808):
+    for port in (7890, 7897, 10808):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.05)
