@@ -1,38 +1,24 @@
 # aistudio-api
 
-<p align="center">
-  <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
-  <a href="https://deepwiki.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/DeepWiki-DeconstructedCube%2Faistudio--api-5B68E4?style=flat-square&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==" alt="DeepWiki"></a>
-  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/Framework-FastAPI-009688?style=flat-square&logo=fastapi" alt="FastAPI"></a>
-  <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?style=flat-square&logo=vuedotjs" alt="Vue 3"></a>
-  <a href="https://docs.astral.sh/uv/"><img src="https://img.shields.io/badge/Python-3.11%2B%20%7C%20uv-261230?style=flat-square&logo=python" alt="Python uv"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
-</p>
+Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 Node/Playwright/Selenium）承载 AI Studio Web 会话，
+对外提供 **Gemini `v1beta`** 与 **OpenAI 兼容**两套 API，另附 Web 管理控制台。
+基于 [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api) 二次开发，**仅支持 Windows 宿主**。
 
-<p align="center">
-  Google AI Studio 反向代理服务，将 Web 端 AI Studio 转换为标准 Google Gemini API 协议接口。
-</p>
-
-<p align="center">
-  <a href="./README_EN.md">English Documentation</a>
-</p>
-
----
+> 详细设计文档（架构 / Wire 协议 / BotGuard 链路 / 研究报告）只保留在本地 `docs/`，不入库。
 
 ## 目录
 
 - [核心特性](#核心特性)
-- [技术架构与文档](#技术架构与文档)
+- [架构](#架构)
 - [快速开始](#快速开始)
-  - [Windows](#windows)
+- [三上游与模型前缀路由](#三上游与模型前缀路由)
 - [配置与环境变量](#配置与环境变量)
+- [运行期设置](#运行期设置)
+- [单浏览器与账号池（零自动重试）](#单浏览器与账号池零自动重试)
+- [流式语义](#流式语义)
 - [API 调用示例](#api-调用示例)
-  - [cURL 调用](#curl-调用)
-  - [Python SDK (google-genai)](#python-sdk-google-genai)
-  - [工具调用 (Function Calling)](#工具调用-function-calling)
 - [Web 管理控制台](#web-管理控制台)
 - [开发与测试](#开发与测试)
-- [开源协议](#开源协议)
 
 ---
 
@@ -40,407 +26,263 @@
 
 | 功能模块 | 说明 |
 |---|---|
-| **Gemini 协议兼容** | 支持 `/v1beta/...` 接口规范，包括 Thinking 思维链、多模态、Function Calling 工具调用及图片生成 |
-| **动态模型发现** | 自动向上游同步可用模型列表，支持 `gemini-3.8-flash`、`gemini-3.8-flash` 等最新模型 |
-| **多账号自动轮换** | 单浏览器上的账号池：只有 429 驱动换号，且第 5 次 429 才把账号/模型打入冷宫（防误杀），每日美西午夜自动重置；网关对当次请求零自动重试，失败按真实错误返回 |
-| **运行状态持久化** | 模型调用量、Token 消耗统计 (`stats.json`) 以及账号 429 限额与冷却状态 (`rotator_state.json`) 自动落盘，容器/服务重启不丢失状态 |
-| **下游参数容错与丢弃** | 支持配置 `drop_unsupported_params` 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
-| **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
-| **内置搜索与工具** | 支持 Google Search 联网搜索、Google Maps、代码执行沙箱等官方扩展能力 |
-| **轻量 CDP 驱动** | 基于纯 Python 异步 WebSocket 直连 Chrome DevTools Protocol，无需 Node.js、Playwright 或 Selenium |
-| **无消息引导（WAA binding）** | 默认不往对话里发探针消息：DI 探针接住 BotGuardService、复用页面自身请求头，签名前把内容写入提示词输入框（binding，只写值不发送）；探针签名失败时自动回退 `say '1'` 引导 |
-| **OpenAI 兼容端口** | 除 Gemini 原生 `/v1beta/...` 外，新增 `POST /v1/chat/completions`（非流式 + SSE，工具调用、`reasoning_content`、`usage`）与 `GET /v1/models`，与 Gemini 端口共用同一条 normalize→capture→replay→parse 链路 |
-| **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 思考等级 / 返回思考内容 / 丢弃客户端 max_tokens / 采样参数）、预填充兼容（含思维链闭合守卫）、工具调用 bypass（含思考/工具签名哨兵），落在 `data/settings.json`，改完立即生效、无需重启 |
-| **工具调用抗截断 bypass** | 让模型把正文写进一次合成函数调用的 `content` 参数，网关再还原成普通正文流；用于绕开只扫描正文流的外部审查截断。非流式/流式都支持，`required` 模式没调工具会报错 |
-| **流式可靠性与心跳** | 没有「单次生成最长等待 / 流式空闲」看门狗，长回答不会被网关掐断；流式响应从请求开始每 1 秒发一次 SSE 心跳（OpenAI 空 delta chunk / Gemini 原生 `: ping` 注释行），bypass 首块前的长静默也不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文；页面 fetch 网络失败（如 `Failed to fetch`）后台重启该浏览器并明确报 502（不自动重试） |
+| **双协议端口** | Gemini 原生 `/v1beta/...`（`google-genai` SDK 直连；`generateContent` / `streamGenerateContent` / `models`）；OpenAI 兼容 `POST /v1/chat/completions`（非流式 + SSE，工具调用、`reasoning_content`、`usage`）与 `GET /v1/models` |
+| **三上游前缀路由** | `pg/`（默认，受控浏览器）/ `express/`（Vertex Express 官方 Key 直连）/ `cookie/`（Cloud 控制台 Cookie 直连），按模型名前缀选路，详见[下文](#三上游与模型前缀路由) |
+| **多账号自动轮换** | 单浏览器账号池：只有 429 驱动换号，且**第 5 次** 429 才把账号/模型打入冷宫（防误杀，冷却到美西午夜），成功一次清零计数；网关对当次请求**零自动重试**，失败按真实错误返回 |
+| **工具调用抗截断 bypass** | 让模型把正文写进一次合成函数调用的 `content` 参数，网关再还原成普通正文流；用于绕开只扫描正文流的外部审查截断。默认关，非流式/流式都支持，`required` 模式没调工具会报错 |
+| **无消息引导（WAA binding）** | 默认不往对话里发探针消息：探针接住页面 BotGuardService、复用页面自身请求头，签名前把内容写入提示词输入框（只写值不发送）；探针签名失败自动回退 `say '1'` 引导 |
 | **签名哨兵** | 发往上游的思考签名 / 工具签名默认换成官方逃生口 `skip_thought_signature_validator`，避免上游「校验后替换内容」导致的死循环 |
-| **Web 管理面板** | 提供 Web 管理控制台，支持账号管理（文本与 JSON 批量导入）、调用量监控、系统配置（日志 / API Key），以及独立的「运行期设置」页 |
+| **流式可靠性与心跳** | 没有任何「生成等待时长」看门狗，长回答不会被网关掐断；流式响应每 1 秒一条 SSE 心跳（OpenAI 空 delta chunk / Gemini `: ping`），bypass 首块前的长静默不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文 |
+| **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 档位 / 采样参数 / max_tokens）、预填充兼容（含思维链闭合守卫）、bypass 开关，落在 `data/settings.json`，改完立即生效、无需重启 |
+| **下游参数容错** | 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
+| **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
+| **运行状态持久化** | 模型调用量与 Token 统计（`stats.json`）、账号 429 冷却状态（`rotator_state.json`）自动落盘，重启不丢 |
+| **Web 管理面板** | 仪表盘（请求量 / 成功率 / 429 指标）、账号管理（文本与 JSON 批量导入）、系统设置与运行期设置 |
+
 > [!NOTE]
-> **内存占用参考**：纯 Python 后端服务常驻内存约 35 - 45 MB；拉起单实例受控 Chromium 后总物理内存 (PSS) 约 350 - 450 MB。仅支持 Windows 宿主。
+> **内存占用参考**：纯 Python 后端常驻约 35-45 MB；拉起受控 Chromium 后总物理内存 (PSS) 约 350-450 MB。
 
-## 技术架构与文档
+---
+
+## 架构
 
 ```
-┌────────────────────────────────────────────────────────┐
-│               Client (cURL / Python SDK)               │
-└───────────────────────────┬────────────────────────────┘
-                            │ /v1beta/models/...
-┌───────────────────────────▼────────────────────────────┐
-│              FastAPI HTTP Gateway (Port 8080)          │
-├───────────────────────────┬────────────────────────────┤
-│    Account Rotator        │    Chat & Wire Codec       │
-│  (Sticky & 429 Isolation) │ (Protobuf-JSON & BotGuard) │
-└───────────────────────────┼────────────────────────────┘
-                            │ CDP WebSocket
-┌───────────────────────────▼────────────────────────────┐
-│      Controlled Chromium Instance (CloakBrowser)       │
-│       In-Page XHR Replay (withCredentials=true)        │
-└───────────────────────────┬────────────────────────────┘
-                            │ HTTPS / RPC
-┌───────────────────────────▼────────────────────────────┐
-│         Google AI Studio (alkalimakersuite-pa)         │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│      Client（cURL / google-genai / OpenAI SDK）   │
+└────────────────────────┬─────────────────────────┘
+                         │  /v1beta/...  /v1/chat/completions
+┌────────────────────────▼─────────────────────────┐
+│            FastAPI HTTP Gateway (:8080)           │
+│      账号池 / 429 冷却 / 参数覆写 / bypass / 心跳   │
+└─────────┬──────────────────┬──────────────────┬───┘
+     pg/（默认）          express/           cookie/
+┌─────────▼────────┐ ┌──────▼───────────┐ ┌───▼──────────────┐
+│  受控 Chromium    │ │  Vertex Express  │ │  Cloud Console   │
+│  （CDP + WAA 签名）│ │  （官方 API Key） │ │（batchGraphql）  │
+└──────────────────┘ └──────────────────┘ └──────────────────┘
 ```
 
-详细的设计与协议分析文档：
-
-- [系统架构设计 (ARCHITECTURE.md)](./docs/ARCHITECTURE.md)：分层架构、请求生命周期、Wire Codec 编解码与并发控制模型。
-- [Wire 协议逆向技术规范 (WIRE_SPECIFICATION.md)](./docs/WIRE_SPECIFICATION.md)：Protobuf-JSON 数组映射、字段索引、多模态 Part 结构与 Schema 编码。
-- [BotGuard 验证链路机制 (BOTGUARD_VERIFICATION_CHAIN.md)](./docs/BOTGUARD_VERIFICATION_CHAIN.md)：WAA 挑战握手、Wasm 动态签名、内容哈希与服务端校验流程。
-- [智能体与协作规范 (AGENT.md)](./AGENT.md)：类型系统要求、代码质量检查与开发指南。
+`pg/` 通道：网关把请求在页面上下文里重放（`withCredentials` XHR，WAA/BotGuard 由页面亲签），命中 AI Studio 的 playground 配额桶（含 `gemini-4-argon`）。
+`express/` 与 `cookie/` 无浏览器、无账号池语义，错误原样透传，同样零自动重试。
 
 ---
 
 ## 快速开始
 
-### Windows
+前置：[Python 3.11+](https://www.python.org/downloads/)（勾选 `Add python.exe to PATH`）。
 
-前置要求：电脑已安装 [Python 3.11+](https://www.python.org/downloads/)（安装时勾选 `Add python.exe to PATH`）。
-
-打开 PowerShell 或终端，依次执行：
-
-```bat
-# 步骤 1：安装 uv 包管理工具
+```powershell
+# 1. 安装 uv（已装跳过）
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 步骤 3：同步安装项目依赖
+# 2. 同步依赖
 uv sync
 
-# 步骤 4：安装 CloakBrowser 浏览器（仅首次需要）
+# 3. 安装受控浏览器（仅首次；或自备并设 AISTUDIO_BROWSER_EXECUTABLE）
 scripts\install-browser.bat
 
-# 步骤 5：启动服务
-uv run python main.py server --port 8080
+# 4. 启动
+.\start.ps1
 ```
 
-服务启动后，浏览器访问 **`http://localhost:8080`** 进入管理控制台。
+`start.ps1` 在前台跑、日志实时输出，`Ctrl+C` 停止；自动复用 `.venv` / `venv`，缺依赖时按 `requirements.txt` 补装。
+执行策略受限时先跑一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+
+```powershell
+$env:PORT='8081'; .\start.ps1                            # 换端口
+$env:HOST='127.0.0.1'; .\start.ps1                       # 只本机
+$env:AISTUDIO_BROWSER_HEADLESS='false'; .\start.ps1      # 有头浏览器（调试 WAA）
+```
+
+等效命令：`uv run python main.py server --port 8080`。
 
 ---
 
-### 一键启动（start.ps1）
+## 三上游与模型前缀路由
 
-**Windows**：在 PowerShell 里运行仓库根目录的 `start.ps1`，服务直接在当前终端**前台**跑，日志实时打在屏幕上；按 `Ctrl+C` 就停（PowerShell 不会追问 `Terminate batch job (Y/N)?`）。若提示执行策略受限，先执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+按**模型名前缀**选通道（`infrastructure/upstreams/registry.py`）：
 
-```powershell
-.\start.ps1
-$env:PORT='8081'; .\start.ps1              # 换端口
-$env:HOST='127.0.0.1'; .\start.ps1         # 只本机
-$env:AISTUDIO_BROWSER_HEADLESS='false'; .\start.ps1   # 有头浏览器
-```
+| 前缀 | 通道 | 凭据 | 说明 |
+|---|---|---|---|
+| `pg/`（默认） | 受控浏览器 + 账号池 | AI Studio Cookie（WebUI 导入） | playground 配额桶，支持 argon；无前缀裸模型名也走这里（除非 `AISTUDIO_UPSTREAM` 覆盖默认通道） |
+| `express/` | Vertex Express | `VERTEX_EXPRESS_API_KEY` | 官方 Key 直连，无浏览器；真流式（含 `streamFunctionCallArguments` 工具参数增量） |
+| `cookie/` | Cloud 控制台 batchGraphql | `AISTUDIO_CONSOLE_COOKIE` | Cookie 直连，无浏览器；配额金贵 |
 
-脚本会自动复用 `.venv` / `venv`（都没有就用 PATH 里的 `python`），缺依赖时按 `requirements.txt` 装一遍。
-日志只保留 LLM 请求 / 上游重试 / 错误（健康检查、面板轮询、uvicorn access 日志不再刷屏）；
-要看更细的转换细节，把 `config.yaml` 的 `logging.level` 改成 `DEBUG`。
-
-优先用已有 `.venv` / `venv`（`VENV` 可指定）；没有就用 `uv`
-建环境（没有 uv 则 `python -m venv`）；依赖装过一次（能 import fastapi）就跳过。
-浏览器仍需事先准备好（`scripts/setup-browser.sh` / `scripts/install-browser.ps1`，
-或设置 `AISTUDIO_BROWSER_EXECUTABLE`）。
+- `/v1/models` 走本地模型表 `data/models.json`（带前缀别名的模型清单）；裸模型名不出现在列表里但**仍可调用**（走默认通道）。
+- `AISTUDIO_UPSTREAM=vertex_express|console_graphql` 可把**默认通道**切到无浏览器上游（`pg/` 前缀仍强制走浏览器）。
+- `express/` 锁 `locations/global`：无位置入口会被 Google 路由到项目默认区（实测 `asia-southeast1`），新模型只在 global 发布，表现为「模型名写错」式的 404；钉 global 需配合 `GOOGLE_PROJECT_ID` 项目号。
 
 ---
 
 ## 配置与环境变量
 
 服务启动后可访问 `http://localhost:8080` 进入 Web 控制台管理账号、日志与运行期设置。
-
-### 环境变量支持
+凭据类配置放 `.env`（已 gitignore，不入库）。
 
 | 变量名 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | API 服务监听端口 |
-| `AISTUDIO_HOST` | string | `0.0.0.0` | 监听地址。默认对局域网/其它设备开放；只允许本机访问就设 `127.0.0.1` |
-| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`） |
-| `AISTUDIO_PROXY` | string | `""` | 出口代理地址，支持 `http://`、`https://` 或 `socks5://` |
+| `AISTUDIO_HOST` | string | `0.0.0.0` | 监听地址；只允许本机访问就设 `127.0.0.1` |
+| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可 `AISTUDIO_ADMIN_PASSWORD`） |
+| `AISTUDIO_PROXY` | string | 自动探测 | 出口代理（`http://` / `https://` / `socks5://`），浏览器与无浏览器上游共用；不设时自动探测本机 `7890/7897/10808` 端口 |
+| `AISTUDIO_UPSTREAM` | string | `aistudio` | 默认通道覆盖：`vertex_express` / `console_graphql`（`pg/` 前缀不受影响） |
+| `VERTEX_EXPRESS_API_KEY` | string | `""` | express/ 通道官方 Key |
+| `GOOGLE_PROJECT_ID` | string | `""` | express/ 通道项目号（钉 global 位置必需） |
+| `AISTUDIO_EXPRESS_LOCATION` | string | `global` | express/ 通道位置（保持默认） |
+| `AISTUDIO_CONSOLE_COOKIE` | string | `""` | cookie/ 通道控制台 Cookie |
+| `AISTUDIO_CONSOLE_PROJECT_ID` | string | `""` | cookie/ 通道项目号 |
 | `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录 |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | 账号持久化凭据目录 |
-| `AISTUDIO_STATS_FILE` | string | `data/stats.json` | 模型调用与 Token 使用量统计持久化文件 |
-| `AISTUDIO_ROTATOR_STATE_FILE` | string | `data/rotator_state.json` | 账号调度与 429 冷却状态持久化文件 |
-| `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | 模型规则与默认工具配置文件路径 |
-| `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化模型调用与 Token 统计（1=开启，0=关闭） |
-| `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号 429 冷却与调度状态（1=开启，0=关闭） |
-| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径 |
-| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP)，单浏览器独占 |
-| `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否以无头模式运行 Chromium |
-| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `1800` | 浏览器空闲自动回收超时秒数（0 为禁用） |
+| `AISTUDIO_STATS_FILE` | string | `data/stats.json` | 模型调用与 Token 统计文件 |
+| `AISTUDIO_ROTATOR_STATE_FILE` | string | `data/rotator_state.json` | 账号调度与 429 冷却状态文件 |
+| `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | 模型规则与默认工具配置 |
+| `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化调用统计 |
+| `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号冷却状态 |
+| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 Chromium 可执行文件路径 |
+| `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium CDP 远程调试端口（单浏览器独占） |
+| `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否无头运行 Chromium |
+| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `1800` | 浏览器空闲自动回收秒数（0 禁用） |
 | `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.8-flash` | 默认文本模型 |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | 默认图像生成模型 |
-| `AISTUDIO_TIMEZONE` | string | 自动探测 | 受控浏览器指纹与 Wire 协议交互时区（默认 `America/Los_Angeles`） |
+| `AISTUDIO_TIMEZONE` | string | 自动探测 | 受控浏览器指纹时区（默认 `America/Los_Angeles`） |
 | `AISTUDIO_LOCALE` | string | `en-US` | 受控浏览器区域语言 |
-| `AISTUDIO_DUMP_REQUESTS` | bool | `false` | 是否在终端转储每次 API 交互报文详情（支持 `DEBUG=1` 触发） |
-| `AISTUDIO_DUMP_FILE` | bool | `false` | 是否将请求与响应报文详情落盘保存 |
-| `AISTUDIO_DUMP_DIR` | string | `dumps/` | 报文转储保存目录 |
-| `AISTUDIO_SETTINGS_FILE` | string | `data/settings.json` | 运行期设置持久化文件（见下节「运行期设置」） |
+| `AISTUDIO_DUMP_REQUESTS` | bool | `false` | 终端转储每次 API 交互报文（支持 `DEBUG=1` 触发） |
+| `AISTUDIO_DUMP_FILE` | bool | `false` | 报文详情落盘 |
+| `AISTUDIO_DUMP_DIR` | string | `dumps/` | 报文转储目录 |
+| `AISTUDIO_SETTINGS_FILE` | string | `data/settings.json` | 运行期设置持久化文件 |
 
 ---
 
 ## 运行期设置（WebUI「运行期设置」页 / `GET|PUT /settings`）
 
-和 `config.yaml` 的分工：`config.yaml` 是**启动期配置**（监听、鉴权、模型默认档案，手工编辑，改完需重启）；
-下面这些是**运行期设置**，落在 `data/settings.json`，**改完立即生效、不用重启**。
+与 `config.yaml` 的分工：`config.yaml` 是**启动期配置**（监听、鉴权、模型默认档案，改完需重启）；
+运行期设置落在 `data/settings.json`，**改完立即生效**。
 
 | 分组 | 设置项 | 说明 |
 |---|---|---|
-| 参数覆写 | `thinkingMode` / `thinkingLevel` | 思考控制：跟随客户端 / 强制关到最低 / 强制用指定档位；档位按模型实际支持收敛（3 Pro 只有 low/high，3.8-flash 最低是 low） |
-| 参数覆写 | `includeThoughts` | 关掉后上游不再回传思维链，OpenAI 端口 `reasoning_content` 为空、Gemini 端口没有 thought part |
+| 参数覆写 | `thinkingMode` / `thinkingLevel` | 思考控制：跟随客户端 / 强制关到最低 / 强制指定档位（按模型实际支持收敛） |
+| 参数覆写 | `includeThoughts` | 关掉后上游不再回传思维链（OAI 端口 `reasoning_content` 为空） |
 | 参数覆写 | `dropMaxTokens` / `maxOutputTokens` | 丢掉客户端写死的 max_tokens / 用固定上限覆写 |
-| 参数覆写 | `temperature` / `topP` / `topK` | 留空 = 用客户端值；填了无条件覆盖（topK 收敛到 63） |
-| 预填充兼容 | `prefillEnabled` / `prefillCotGuard` / `prefillNudge` | 请求以 assistant 轮结尾时补续写指令并拼回响应；预填充停在未闭合标签时要求模型先闭合（思维链闭合守卫） |
-| 工具调用 bypass | `bypassEnabled` / `bypassMode` / `bypassMergeOutside` / `bypassInstructionPosition` / `bypassInstruction` / `bypassToolPrefix` | 让模型把正文写进一次合成函数调用，网关再还原；用 `required` 模式可在模型没调工具时直接报错排查预设 |
-| 工具调用 bypass | `sigSentinelThought` / `sigSentinelTool` | 签名哨兵：把发往上游的思考/工具签名换成官方逃生口 `skip_thought_signature_validator`（默认开） |
+| 参数覆写 | `temperature` / `topP` / `topK` | 留空用客户端值；填了无条件覆盖（topK 收敛到 63） |
+| 预填充兼容 | `prefillEnabled` / `prefillCotGuard` / `prefillNudge` | 请求以 assistant 轮结尾时补续写指令并拼回响应；预填充停在未闭合标签时要求模型先闭合 |
+| 工具调用 bypass | `bypassEnabled`（默认关） / `bypassMode` / `bypassMergeOutside` / `bypassInstructionPosition` / `bypassInstruction` / `bypassToolPrefix` | 正文写进合成函数调用再还原；`required` 模式在模型没调工具时直接报错，用于排查预设 |
+| 工具调用 bypass | `sigSentinelThought` / `sigSentinelTool` | 签名哨兵：换成官方逃生口 `skip_thought_signature_validator`（默认开） |
 
 命令行读写（与 WebUI 等价）：
 
 ```bash
-curl -s http://127.0.0.1:8080/settings | jq          # schema + 当前值 + 文件路径
+curl -s http://127.0.0.1:8080/settings | jq
 curl -s -X PUT http://127.0.0.1:8080/settings \
   -H 'Content-Type: application/json' \
   -d '{"patch":{"bypassEnabled":true,"thinkingMode":"console","thinkingLevel":"low"}}'
 ```
 
-> [!NOTE]
-> 单轮口径：bypass 不再续写。正文最后一个 XML 标签没闭合时只会在日志里留一条
-> 「输出可能不完整」，不驱动重试。
 ---
 
 ## 单浏览器与账号池（零自动重试）
 
-单台受控 Chromium 承载全部请求（多浏览器 worker 池已按用户要求于 2026-10-20 移除）；
-**账号池保留**：多账号在同一台浏览器上轮换，切换走蓝绿热切（在途流式不中断）。
+单台受控 Chromium 承载全部请求；账号池在同一台浏览器上轮换，切换走蓝绿热切（在途流式不中断）。
 
-- **只有 429 驱动换号，且防误杀**：单账号/模型累计**第 5 次** 429 才打入冷宫
-  （冷却到美西午夜配额重置）；前 4 次只计数不冷却、不换号，成功一次即清零计数。
-- **故障自愈（零自动重试）**：403/401、页面 fetch/XHR 传输失败、会话挂死、登录页重定向
-  都是**浏览器故障**——杀掉浏览器进程（下次请求自动重建），让**后续**请求拿到干净页面；
-  **本次请求不重试**，按真实错误返回（传输失败 = 502），要不要重发由客户端决定。
-  这些错误**不给账号加冷却**（不是配额问题），也**不换号**。
-- **登录态失效**（SessionExpiredError，真的被跳到登录页）凭据已死，按账号隔离 24h 并重启浏览器。
+- **只有 429 驱动换号，且防误杀**：单账号/模型累计第 5 次 429 才打入冷宫（冷却到美西午夜配额重置）；前 4 次只计数不冷却、不换号，成功一次即清零。
+- **故障自愈（零自动重试）**：403/401、页面 fetch/XHR 传输失败、会话挂死、登录页重定向都是**浏览器故障**——杀掉浏览器进程（下次请求自动重建 20~40s），**本次请求不重试**，按真实错误返回（传输失败 = 502），要不要重发由客户端决定。这些错误不给账号加冷却、不换号。
+- **登录态失效**（真被跳到登录页）：凭据已死，按账号隔离 24h 并重启浏览器。
 - 传输失败时日志附 CDP 网络层证据（`net::ERR_*`）便于归因断连。
-- 空闲自动回收（`AISTUDIO_BROWSER_IDLE_TIMEOUT`）后，下次请求会重新拉起浏览器（20~40s）。
 
 ---
 
-## 流式语义：什么时候是真流式，什么时候是「整段返回」
+## 流式语义
 
-网关对外**始终是 SSE**：请求开始就给 `200 text/event-stream`，上游没有事件时每 1 秒发一条心跳
-（OpenAI：空 delta chunk；Gemini 原生：`: ping`）。但**上游自己流不流，取决于请求形态**：
+网关对外**始终是 SSE**：请求开始就给 `200 text/event-stream`，上游无事件时每秒一条心跳。
+但**上游流不流，取决于请求形态**：
 
-| 场景 | 上游行为 | 客户端会看到 |
+| 场景 | 上游行为 | 客户端看到 |
 |---|---|---|
-| 普通请求（bypass 关） | MakerSuite `GenerateContent` 逐块下发正文 | 心跳 → 正文分块到达（实测 19 块、块间隔约 0.3s） |
-| **bypass 开**（工具调用抗截断，默认开） | 模型输出的是一个**合成 functionCall**；Gemini 不分片下发函数参数，**第一帧就是整段工具调用**，在它准备好之前连 HTTP 响应头都不会到 | 心跳（可能持续数十秒到数分钟）→ 正文一次性到达 → usage / finish |
+| 普通请求（bypass 关） | MakerSuite `GenerateContent` 逐块下发正文 | 心跳 → 正文分块（实测约 0.3s 块间隔） |
+| bypass 开 | 模型输出一个合成 `functionCall`；Gemini 不分片下发函数参数，第一帧即整段 | 心跳（可达数十秒到数分钟）→ 正文一次性到达 → usage / finish |
 
-所以静默期的日志里**只有心跳，没有别的**（周期性「上游 Ns 无任何数据」WARN 已按用户要求
-于 2026-10-20 移除——几百秒的 bypass 请求它只会刷屏）：
+判据看完成后请求日志的 **`首包 X s / 总 Y s`**：首包 ≈ 总时长 = bypass 整段返回；首包 ≪ 总时长 = 真流式。
+express/ 通道（Vertex Express）是上游真流式，工具参数还有增量下发。
+静默期日志里只有心跳属正常——项目没有任何「生成等待时长」看门狗，bypass 静默多久都不中止。
 
-- 完成后请求日志里的 **`首包 X s / 总 Y s`** 是判据：首包 ≈ 总时长 = bypass 整段返回；
-  首包 ≪ 总时长 = 真流式；
-- 传输失败时另有 `CDP 网络层证据 … err=net::ERR_xxx` 一条 WARN 用来归因断连；
-- 项目没有任何「生成等待时长」看门狗（用户明确要求），bypass 静默多久都不中止。
-
-如果上游在第一帧之前断开（页面 `fetch` 抛 `TypeError: Failed to fetch`），网关会：
-
-1. 记一次 `BrowserTransportError`（不是 500），杀掉浏览器进程、下次请求重建（救后续请求）；
-2. **本次请求直接返回 502 `upstream_error`，不自动重试**（网关零自动重试，2026-10-20 拍板），
-   客户端要重试就重发一条新请求。
-
-> 真机数据（2026-10-20，同一账号，flash）：
-> 普通流式 19 块 / 块间隔 0.3s；bypass 请求 1 块，第一帧时间 = 整段生成时间
-> （小请求 7~15s；24 万 token 的 argon 请求在主项目同通道记录里见过 **462s / 576s**）。
-> 结论：**bypass 的「流式」在网关这一侧是合法的 SSE，但上游是整段返回**，不要拿心跳/静默
-> 日志当故障判据。
+上游在第一帧前断开（页面 `fetch` 抛 `TypeError: Failed to fetch`）时：记一次 `BrowserTransportError`、杀浏览器救后续请求；**本次直接返回 502**，不自动重试。
 
 ---
 
 ## API 调用示例
 
-支持以下鉴权方式：
-- Query 参数：`?key=YOUR_API_KEY`
-- 请求头：`x-goog-api-key: YOUR_API_KEY`、`x-api-key: YOUR_API_KEY` 或 `Authorization: Bearer YOUR_API_KEY`
+支持的鉴权方式：query `?key=`、请求头 `x-goog-api-key` / `x-api-key` / `Authorization: Bearer`。
 
-### cURL 调用
-
-<details>
-<summary><b>1. 查询模型列表</b></summary>
+### cURL
 
 ```bash
-curl http://localhost:8080/v1beta/models \
-  -H "x-goog-api-key: your-api-key"
-```
-</details>
+# 模型列表（本地表，带通道前缀别名）
+curl http://localhost:8080/v1beta/models -H "x-goog-api-key: your-api-key"
 
-<details>
-<summary><b>2. 文本生成 (Non-streaming)</b></summary>
-
-```bash
+# 文本生成（默认通道 = pg/）
 curl http://localhost:8080/v1beta/models/gemini-3.8-flash:generateContent \
-  -H "x-goog-api-key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [
-      {
-        "role": "user",
-        "parts": [{"text": "用简短的一句话介绍量子计算。"}]
-      }
-    ]
-  }'
+  -H "x-goog-api-key: your-api-key" -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"用一句话介绍量子计算。"}]}]}'
+
+# 流式 + 指定通道（express/ 走 Vertex Express）
+curl http://localhost:8080/v1beta/models/express/gemini-4-argon:streamGenerateContent?alt=sse \
+  -H "x-goog-api-key: your-api-key" -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}'
+
+# OpenAI 兼容端口
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
-</details>
 
-<details>
-<summary><b>3. 流式生成 (Server-Sent Events)</b></summary>
-
-```bash
-curl http://localhost:8080/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse \
-  -H "x-goog-api-key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [
-      {
-        "role": "user",
-        "parts": [{"text": "介绍一下 Python 协程的工作原理。"}]
-      }
-    ]
-  }'
-```
-</details>
-
----
-
-### Python SDK (google-genai)
-
-使用 Google 官方 `google-genai` SDK 直连本代理服务：
+### Python SDK（google-genai）
 
 ```python
 from google import genai
 
 client = genai.Client(
     api_key="your-api-key",
-    http_options={
-        "api_version": "v1beta",
-        "base_url": "http://localhost:8080",
-    },
+    http_options={"api_version": "v1beta", "base_url": "http://localhost:8080"},
 )
 
-# 1. 流式响应
-response = client.models.generate_content_stream(
-    model="gemini-3.8-flash",
-    contents="解释一下什么是反应式编程？",
-)
-for chunk in response:
+for chunk in client.models.generate_content_stream(
+    model="gemini-3.8-flash", contents="解释一下反应式编程？"
+):
     print(chunk.text, end="", flush=True)
-
-# 2. 非流式响应
-result = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents="用 Python 写一个快速排序算法。",
-)
-print(result.text)
 ```
 
----
+### 工具调用
 
-### 工具调用 (Function Calling)
-
-```python
-from google import genai
-from google.genai import types
-
-client = genai.Client(
-    api_key="your-api-key",
-    http_options={
-        "api_version": "v1beta",
-        "base_url": "http://localhost:8080",
-    },
-)
-
-# 定义工具声明
-weather_tool = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_current_weather",
-            description="获取指定地点的实时天气状况",
-            parameters=types.Schema(
-                type="OBJECT",
-                properties={
-                    "location": types.Schema(
-                        type="STRING",
-                        description="城市或地区名称，例如 'Beijing' 或 'Tokyo'",
-                    ),
-                    "unit": types.Schema(
-                        type="STRING",
-                        enum=["celsius", "fahrenheit"],
-                        description="温度单位",
-                    ),
-                },
-                required=["location"],
-            ),
-        )
-    ]
-)
-
-response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents="今天杭州天气怎么样？",
-    config=types.GenerateContentConfig(tools=[weather_tool]),
-)
-
-if response.function_calls:
-    for call in response.function_calls:
-        print(f"触发工具调用: {call.name}")
-        print(f"调用参数: {call.args}")
-```
+Gemini 端口与 OpenAI 端口均支持 Function Calling（`tools` / `function_declarations`，OAI 端口自动翻译）。
+`express/` 通道另有 Vertex 专有的工具参数增量流式（`streamFunctionCallArguments`）。
 
 ---
 
 ## Web 管理控制台
 
-系统内置静态打包的 Web 前端管理控制台（访问 `http://localhost:8080`）：
+访问 `http://localhost:8080`（Vue 3 + Vite 构建产物内置于后端）：
 
-- **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
-- **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
-- **系统设置 (Settings)**：服务状态、日志级别与请求转储、API Key 管理；运行期参数在独立的「运行期设置」页调整。
-- **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫。
+- **仪表盘**：服务健康、各模型请求量、成功率与 429 冷却指标。
+- **账号管理**：Cookie 单条与凭据包批量导入、多账号自动探测、手动切换 / 重置冷却。
+- **系统设置**：日志级别、请求转储、API Key 管理；运行期参数在独立「运行期设置」页。
+- **访问鉴权**：设 `AISTUDIO_WEB_PASSWORD` 后自动开启登录守卫。
 
 ---
 
 ## 开发与测试
 
-前端源码位于 `web/`，采用 Vue 3 + TypeScript + Vite + Tailwind CSS：
+前端源码在 `web/`（Vue 3 + TypeScript + Vite + Tailwind）：
 
 ```bash
-# 启动前端开发调试服务
 cd web
-bun install
-bun run dev          # 启动开发服务（localhost:3000，代理至 8080）
-bun run type-check   # 执行 TypeScript 类型校验
-bun run lint         # 执行 ESLint 代码规范检查
-bun run build        # 生产构建，产物输出至 src/aistudio_api/static
+bun install && bun run dev        # 开发服务（:3000，代理至 8080）
+bun run build                     # 产物输出至 src/aistudio_api/static
 ```
 
-Python 端质量检查与测试：
+Python 侧：
 
 ```bash
-# 执行代码风格与 Lint 检查
-uv run ruff check .
-# 执行静态类型检查
-bun x pyright
-
-# 执行单元测试套件
-uv run pytest
+uv run ruff check .               # Lint
+uv run pytest                     # 单元测试（基线 533 passed / 0 failed）
 ```
 
-> [!NOTE]
-> 全量测试本地基线 **533 passed / 0 failed**（此前的 7 条 Windows「环境失败」实为缺 encoding
-> 的真 bug，已修复；明细见 `AGENT.md` §3.4）。交接状态、未解决问题、真机证据与诊断脚本见 **`AGENT.md` §6**；
-> 项目里只有一个目录 `C:\sister-aistudio`，测试用项目 `.venv`（`pytest`/`ruff` 已装）；
-> 改完代码记得重启服务才生效。
-
----
-
-## 开源协议
-
-本项目基于 [MIT License](./LICENSE) 许可协议开源。
+> 开发规范与交接状态见 [AGENT.md](./AGENT.md)。改完代码需重启 `start.ps1` 才生效。

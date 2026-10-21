@@ -14,7 +14,10 @@ build/
 stream_response.txt
 dumps/
 .vscode/
-!docs/BOTGUARD_VERIFICATION_CHAIN.md
+# 详细设计/逆向文档与英文 README：本地留档，不推 GitHub（2026-10-21）
+/docs/
+/README_EN.md
+/image/
 .env
 uv.toml
 .uv.toml
