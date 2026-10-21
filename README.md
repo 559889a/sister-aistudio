@@ -4,8 +4,6 @@ Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 N
 对外提供 **Gemini `v1beta`** 与 **OpenAI 兼容**两套 API，另附 Web 管理控制台。
 基于 [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api) 二次开发，**仅支持 Windows 宿主**。
 
-> 详细设计文档（架构 / Wire 协议 / BotGuard 链路 / 研究报告）只保留在本地 `docs/`，不入库。
-
 ## 目录
 
 - [核心特性](#核心特性)
