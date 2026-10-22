@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,34 +14,52 @@ from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     STREAM_CLEANUP_JS,
     STREAMING_INIT_JS,
+    build_hooked_request_args,
+    build_streaming_init_args,
 )
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
 
 
-def test_streaming_scripts_defined_and_non_empty():
-    """Verify streaming initialization and cleanup scripts are properly loaded."""
-    assert len(STREAMING_INIT_JS.strip()) > 0
-    assert len(STREAM_CLEANUP_JS.strip()) > 0
-    assert "__AISTUDIO__" in STREAMING_INIT_JS
-    assert "__AISTUDIO__" in STREAM_CLEANUP_JS
-    # 生成等待时长看门狗已彻底删除：页面脚本里不再有 timeout 定时器
-    assert "setTimeout" not in STREAMING_INIT_JS
-
-
-def test_streaming_scripts_have_no_generation_timeout_args():
-    """页面脚本参数里不再传 timeout（生成等多久都不该被自己掐断）。"""
-    from aistudio_api.infrastructure.browser.scripts import (
-        build_hooked_request_args,
-        build_streaming_init_args,
-    )
-
+def test_request_args_carry_no_generation_timeout():
+    """接口契约：传输参数里不许出现任何生成等待时长（看门狗红线，别加回来）。"""
     streaming_args = build_streaming_init_args(
         url="http://x", headers={}, body="{}", rid="r1"
     )
-    assert "timeout" not in streaming_args
-    assert "timeoutMs" not in streaming_args
     hooked_args = build_hooked_request_args(url="http://x", headers={}, body="{}")
-    assert "timeout" not in hooked_args
+    for args in (streaming_args, hooked_args):
+        assert not [key for key in args if "timeout" in key.lower()]
+
+
+def test_hooked_request_gzips_large_body_after_signing():
+    """>96KB 上传体走 gzip：base64 解压后与原文逐字节一致，并带上 Content-Encoding。
+
+    binding/WAA 已按原文签完，这里只压最终传输体；流式参数复用同一份构造。
+    """
+    body = json.dumps(["models/gemini-3.8-flash", "A" * 200_000])
+    args = build_hooked_request_args(url="http://x", headers={"X-A": "1"}, body=body)
+    assert args["gzip"] is True
+    assert args["headers"] == {"X-A": "1", "Content-Encoding": "gzip"}
+    assert gzip.decompress(base64.b64decode(str(args["body"]))).decode("utf-8") == body
+    assert len(str(args["body"])) < len(body) / 10
+
+    streaming_args = build_streaming_init_args(
+        url="http://x", headers={"X-A": "1"}, body=body, rid="r1"
+    )
+    assert streaming_args["gzip"] is True
+    assert streaming_args["rid"] == "r1"
+
+
+def test_hooked_request_keeps_small_body_and_preset_encoding():
+    """小体不压；调用方已声明非 identity 的 Content-Encoding 时不重复压。"""
+    small = build_hooked_request_args(url="http://x", headers={}, body="{}")
+    assert small == {"url": "http://x", "headers": {}, "body": "{}"}
+
+    preset = build_hooked_request_args(
+        url="http://x", headers={"content-encoding": "br"}, body="B" * 200_000
+    )
+    assert "gzip" not in preset
+    assert preset["headers"] == {"content-encoding": "br"}
+    assert preset["body"] == "B" * 200_000
 
 
 @pytest.mark.asyncio

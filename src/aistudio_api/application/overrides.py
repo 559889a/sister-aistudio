@@ -104,6 +104,18 @@ _FAMILIES: tuple[tuple[str, re.Pattern[str], ModelCapabilities], ...] = (
         ),
     ),
     (
+        "gemini-4-argon",
+        re.compile(r"^gemini-4-argon", re.IGNORECASE),
+        ModelCapabilities(
+            family="gemini-4-argon",
+            thinking_kind=THINKING_LEVEL,
+            # argon 实测不接受 MINIMAL（上游 400: Thinking level MINIMAL is not
+            # supported for this model；2026-10-22 真机，thinkingMode=request +
+            # includeThoughts=false 会请求最低档，正是这一档），最低档从 low 起算。
+            levels=("low", "medium", "high"),
+        ),
+    ),
+    (
         "gemini-3+",
         re.compile(r"^gemini-(?:[3-9]|\d{2,})", re.IGNORECASE),
         ModelCapabilities(

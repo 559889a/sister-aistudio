@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 from pathlib import Path
 
 _JS_DIR = Path(__file__).resolve().parent / "js"
+_GZIP_MIN_BYTES = 96 * 1024
 
 
 def _load_js(filename: str) -> str:
@@ -73,9 +76,7 @@ def build_streaming_init_args(
     没有 timeout：生成等待时长不再受看门狗约束（只保留浏览器/CDP 的基础设施超时）。
     """
     return {
-        "url": url,
-        "headers": headers,
-        "body": body,
+        **build_hooked_request_args(url=url, headers=headers, body=body),
         "rid": rid,
     }
 
@@ -84,11 +85,28 @@ def build_hooked_request_args(
     *, url: str, headers: dict[str, str], body: str
 ) -> dict[str, object]:
     """Prepare argument object for HOOKED_REQUEST_JS evaluation（同样不传超时）。"""
-    return {
-        "url": url,
-        "headers": headers,
-        "body": body,
-    }
+    args: dict[str, object] = {"url": url, "headers": headers, "body": body}
+    if any(
+        key.lower() == "content-encoding" and value.lower() != "identity"
+        for key, value in headers.items()
+    ):
+        return args
+    raw = body.encode("utf-8")
+    if len(raw) >= _GZIP_MIN_BYTES:
+        # binding 与 WAA 已按原文完成；只压缩最终传输体，保留全部内容与 proof。
+        args["body"] = base64.b64encode(gzip.compress(raw, compresslevel=6)).decode(
+            "ascii"
+        )
+        args["headers"] = {
+            **{
+                key: value
+                for key, value in headers.items()
+                if key.lower() != "content-encoding"
+            },
+            "Content-Encoding": "gzip",
+        }
+        args["gzip"] = True
+    return args
 
 
 def build_selector_match_js(selector: str) -> str:

@@ -269,6 +269,8 @@ aistudio-api/
 - 三通道四类 Harm 阈值**强制 OFF**（normalize 层单点 `chat_service._FORCED_SAFETY_OFF`，客户端 safetySettings 一律忽略——用户拍板，别改回透传）
 - `registry.pick` 修复：Gemini 原生端口 `models/express/...` 前缀此前**静默掉回浏览器通道**，已修
 - GzipUploadTransport：express/cookie 上行 gzip（>96KB 自动压；httpx 必须同时换 `_content` 和 `stream`，有单测防回归）
+- PG 通道上行 gzip（2026-10-22）：`browser/scripts.py:build_hooked_request_args` 对 >96KB 的上传体压 gzip + 加 `Content-Encoding: gzip`，页面侧 `atob → Uint8Array` 发出（`hooked_request.js` / `streaming_init.js` 同一行改动）。binding/WAA 仍按**原文**签，压缩只发生在签名之后的传输体；flash/argon 共用同一条路径，**没有模型分支**（argon 不需要额外适配，真机 100KB 体 200）。三条单测在 `tests/unit/test_stream_transport.py`
+- argon thinking 档位修正：`gemini-4-argon` 上游**不接受 MINIMAL**（真机 400 `Thinking level MINIMAL is not supported for this model`）；此前 `gemini-4-argon` 落到 `gemini-3+` 的通用档案（四档），`thinkingMode=request + includeThoughts=false`（= 请求最低档）会让 argon 直接 400。`overrides._FAMILIES` 已单列 argon 档位 `low/medium/high`（与 flash 同处理）
 - usage 缓存观测已修正：内部统一 `cached_tokens`；Gemini 使用官方 `cachedContentTokenCount`（原 `cachedTokenCount` 会被 SDK 拒绝/丢弃），OpenAI 使用 `prompt_tokens_details.cached_tokens`；Gemini 保留显式 0，未报告则省略
 - 代理自动探测补 7897（网络形态已从 TUN 切到系统代理，Clash 7897；git 全局 http.proxy 也指 7897）
 - 本轮全项目功能 Debug：canonical 普通/内置工具与输出 Schema 转换、seed/stop/thinking 参数透传；图片 Base64 解码与 thinking token 合计；候选独立/尾部 metadata/截断保全；SDK 零重试与结束状态保真；流式成功和失败统一记账，非 PG 通道不碰 PG 调度
@@ -285,13 +287,23 @@ aistudio-api/
    `POST /v1beta1/cachedContents` 返回 404；补齐项目/global 路径后返回 **401
    UNAUTHENTICATED**，明确「API keys are not supported by this API，Expected OAuth2
    access token」。两种地址各单发、关闭 SDK 重试、未创建任何缓存；不实现生命周期或引用注入。
-2. **pg 已恢复，缓存观测已完成**：沿用实际运行期 bypass/low 设置，隔离 profile 与凭据
-   副本连发两次约 3.3 万 token 的相同上下文，均 `PG_READY` + `STOP`；`cached_tokens`
-   都为 null（上游未报告），本次无缓存命中证据。正式 data/账号/设置未改，临时浏览器已关闭。
+2. **pg 隐式缓存已实测：读得到、但换不来 TTFT（2026-10-22 交错 AB 采样，脚本
+   `tools/pg_cache_a.py` / `pg_cache_b.py`）**：A 臂每轮换长前缀（冷），B 臂复用同一长
+   前缀（热），各 10 发按 ABBA/BAAB 交错，curl 侧量 TTFT（首条非空正文 delta，排除
+   心跳）。结果：**B 臂稳定上报 `cached_tokens`≈97%（66,137/68,193）与≈91%
+   （20,734/22,786），A 臂 10/10 从未上报 → 隐式缓存读写都真实发生**；但 TTFT 没有
+   改善——22.8k 前缀 A 中位 10.30s / B 中位 17.30s，68k 前缀 A 中位 54.12s / B 中位
+   51.86s（噪声 3.4–85s，网关侧 capture 只占 0.17–0.21s，时间全在上游）。
+   → **靠隐式缓存缩短长上下文 TTFT 这条路在 pg 上不成立**，目标②得另找办法。
+   另一个实测细节：缓存**写入有延迟**，预热后第 1–2 发只命中 359 token，之后才满命中。
 3. **429 缓解假设验证**（用户理论：谷歌疑 IP+RPM 双风控，缓存生效则 429 应好转）——
-   缓存落地后观察对比。
-4. **pg 页面内 gzip**：大上下文在 pg 也有 ~16s/MB 上传税；页面 XHR 发 gzip 需验证
-   MakerSuite 前端收不收 + WAA proof（对原始 JSON 串哈希）不受传输层压缩影响。
+   注意第 2 条的结论：缓存确实命中，但没带来延迟收益，所以「缓存生效 → 429 好转」的
+   因果链前半段成立、后半段待观察。
+4. **pg 页面内 gzip 已落地（2026-10-22）**：`build_hooked_request_args` 对 >96KB 上传体
+   压 gzip（页面侧 `atob → Uint8Array` + `Content-Encoding: gzip`），binding/WAA 仍按
+   原文签，flash/argon 同一条路径。真机：21 发 123KB 体 + 1 发 argon 100KB 体全部 200。
+   注意压缩率取决于内容熵——随机词填充的 365KB 体只压到 22.9%（83.7KB），真实中文长
+   上下文会好得多；上传税收益按内容而定，别按固定比例推算。
 5. **ProxyStreamedCall 网关化**（等拍板）：pg 通道 OAI 原生模式 + 模型桶路由
    （argon→pg、flash→express），403 首次自动暖场重试一次（真机已验证暖场解法）。
 6. **express long decode 真机长跑**：首笔真实 >64K 生成验证接力循环。
