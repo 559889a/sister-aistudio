@@ -32,6 +32,7 @@ Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 N
 | **签名哨兵** | 发往上游的思考签名 / 工具签名默认换成官方逃生口 `skip_thought_signature_validator`，避免上游「校验后替换内容」导致的死循环 |
 | **流式可靠性与心跳** | 没有任何「生成等待时长」看门狗，长回答不会被网关掐断；流式响应每 1 秒一条 SSE 心跳（OpenAI 空 delta chunk / Gemini `: ping`），bypass 首块前的长静默不会触发客户端空闲超时；上游流被截断时用 JSON 修复抢救最后一块正文 |
 | **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 档位 / 采样参数 / max_tokens）、预填充兼容（含思维链闭合守卫）、bypass 开关，落在 `data/settings.json`，改完立即生效、无需重启 |
+| **上行 gzip** | express/cookie 通道 >96KB 请求体自动 gzip（`Content-Encoding` 传输层压缩，服务端解压后逐字节一致；与 Google 前端自身行为一致）。大上下文上传时间约降 10-15× |
 | **Express 长输出（long decode）** | express/ 通道设 `max_tokens > 65536` 即触发（仅 gemini-4-argon）：SDK 自动按 64K 接力直到 1M 总预算（输入+思考+输出共享窗口），接力令牌端侧加密、服务端零存储；小时级运行，建议配 SSE 流式（1s 心跳保活）。双端口（OAI `max_tokens` / Gemini `maxOutputTokens`）原生透传 |
 | **安全过滤强制全关** | 三条通道（pg / express / cookie）四类 Harm 阈值一律注入 `OFF`，客户端传的 `safetySettings` 一律忽略；cookie 通道另对 JAILBREAK 类兜底 `OFF`。注：输入侧预审（生成前拒答）是服务端独立硬过滤，阈值关不掉 |
 | **下游参数容错** | 自动丢弃下游传入的不兼容工具与非标准参数，避免 400 阻断 |
@@ -282,7 +283,7 @@ Python 侧：
 
 ```bash
 uv run ruff check .               # Lint
-uv run pytest                     # 单元测试（基线 564 passed / 0 failed）
+uv run pytest                     # 单元测试（基线 569 passed / 0 failed）
 ```
 
-> 开发规范与交接状态见 [AGENT.md](./AGENT.md)。改完代码需重启 `start.ps1` 才生效。
+> 开发规范与交接状态见 [AGENTS.md](./AGENTS.md)。改完代码需重启 `start.ps1` 才生效。
