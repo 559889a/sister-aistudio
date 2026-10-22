@@ -9,13 +9,13 @@ async ({ hash, timeoutMs }) => {
         return { ok: false, reason: 'service_unavailable' };
     }
     const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : 12000;
-    const timer = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('proof_timeout')), budget)
-    );
+    let timer;
     try {
         const proof = await Promise.race([
             Promise.resolve(dms[snapKey](service, hash)),
-            timer,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('proof_timeout')), budget);
+            }),
         ]);
         if (typeof proof === 'string' && proof.length > 0) {
             return { ok: true, len: proof.length };
@@ -23,5 +23,7 @@ async ({ hash, timeoutMs }) => {
         return { ok: false, reason: 'empty_snapshot' };
     } catch (err) {
         return { ok: false, reason: String((err && err.message) || err) };
+    } finally {
+        clearTimeout(timer);
     }
 }

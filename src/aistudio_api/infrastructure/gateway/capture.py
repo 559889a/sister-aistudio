@@ -224,16 +224,13 @@ class RequestCaptureService:
         return captured
 
     async def _ensure_template(self, model: str) -> CapturedRequest:
-        ctx = self._session.active_context
+        ctx = self._session.request_context
         ctx_id = ctx.context_id if ctx else None
-        if self._active_ctx_id != ctx_id:
-            self._templates.clear()
-            self._active_ctx_id = ctx_id
-
-        if model in self._templates:
-            return self._templates[model]
-
         async with self._lock:
+            # Check ownership after acquiring the lock: a queued request may lease another tab.
+            if self._active_ctx_id != ctx_id:
+                self._templates.clear()
+                self._active_ctx_id = ctx_id
             if model in self._templates:
                 return self._templates[model]
 

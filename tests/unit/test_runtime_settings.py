@@ -50,6 +50,22 @@ def test_defaults_and_update_are_persisted(tmp_path: Path):
     assert payload["bypassEnabled"] is True
 
 
+def test_failed_save_keeps_memory_and_disk_unchanged(tmp_path: Path, monkeypatch):
+    path = tmp_path / "settings.json"
+    store = rs.RuntimeSettings(path=path)
+    store.update({"thinkingLevel": "low"})
+    original = path.read_bytes()
+
+    def fail_write(*args):
+        raise OSError("disk write failed")
+
+    monkeypatch.setattr(rs, "atomic_write_json", fail_write)
+    with pytest.raises(OSError, match="disk write failed"):
+        store.update({"thinkingLevel": "high"})
+    assert store.get("thinkingLevel") == "low"
+    assert path.read_bytes() == original
+
+
 def test_invalid_patch_is_rejected_atomically(tmp_path: Path):
     store = _store(tmp_path)
     with pytest.raises(ValueError):

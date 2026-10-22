@@ -45,7 +45,7 @@ async def stream_with_heartbeat(
     - 消费方提前退出（客户端断开）时取消 producer，避免上游继续读。
     """
     interval = HEARTBEAT_INTERVAL_S if interval_s is None else float(interval_s)
-    queue: asyncio.Queue[object] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, object] | _ProducerFailure | object] = asyncio.Queue()
 
     async def _produce() -> None:
         try:
@@ -54,7 +54,14 @@ async def stream_with_heartbeat(
         except Exception as exc:
             await queue.put(_ProducerFailure(exc))
         finally:
-            queue.put_nowait(_DONE)
+            try:
+                close = getattr(source, "aclose", None)
+                if close is not None:
+                    await close()
+            except Exception as exc:
+                queue.put_nowait(_ProducerFailure(exc))
+            finally:
+                queue.put_nowait(_DONE)
 
     producer = asyncio.create_task(_produce())
     try:
@@ -68,7 +75,8 @@ async def stream_with_heartbeat(
                 break
             if isinstance(item, _ProducerFailure):
                 raise item.error
-            yield item
+            if isinstance(item, tuple):
+                yield item
     finally:
         if not producer.done():
             producer.cancel()

@@ -15,13 +15,7 @@ if TYPE_CHECKING:
     from aistudio_api.application.account_rotator import AccountRotator
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
-    from aistudio_api.infrastructure.upstreams.console_graphql import (
-        ConsoleGraphqlClient,
-    )
     from aistudio_api.infrastructure.upstreams.registry import UpstreamRegistry
-    from aistudio_api.infrastructure.upstreams.vertex_express import (
-        VertexExpressClient,
-    )
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -42,8 +36,8 @@ class ModelStatsItem:
 
 @dataclass
 class RuntimeState:
-    # 上游通道可以换实现（aistudio/vertex_express/console_graphql），调用面一致
-    client: AIStudioClient | VertexExpressClient | ConsoleGraphqlClient | None = None
+    # Always the native browser client; non-browser channels live in upstreams.
+    client: AIStudioClient | None = None
     # 三通道注册表（app lifespan 装配）；按模型前缀选路 pg/ express/ cookie/
     upstreams: UpstreamRegistry | None = None
     browser_port: int = 9222

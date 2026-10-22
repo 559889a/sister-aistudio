@@ -7,3 +7,5 @@ python-dotenv>=1.0.0
 PyYAML>=6.0.0
 python-multipart>=0.0.9
 websockets>=14.0.0
+google-genai==2.31.0
+tzdata>=2024.1

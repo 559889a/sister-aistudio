@@ -161,6 +161,9 @@ class GeminiGenerationConfig(BaseModel):
         validation_alias=AliasChoices("responseLogprobs", "response_logprobs"),
     )
     logprobs: int | None = None
+    candidateCount: int | None = Field(
+        default=None, validation_alias=AliasChoices("candidateCount", "candidate_count")
+    )
     # seed 走 wire genConfig idx18（bundle 写入点 tUa=Sk(a,19,b)），此前被静默丢弃
     seed: int | None = None
     mediaResolution: list[object] | int | str | None = Field(

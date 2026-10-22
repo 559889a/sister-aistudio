@@ -6,6 +6,7 @@ import asyncio
 import time
 
 from aistudio_api.api.state import runtime_state
+from aistudio_api.domain.errors import RequestError, UsageLimitExceeded
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
@@ -113,7 +114,6 @@ async def try_switch_account(
                 client.session,
             )
             if result is not None:
-                rotator.clear_cooldown(next_account.id, model=model)
                 _last_switch_time = time.time()
             return result is not None
 
@@ -130,7 +130,6 @@ async def try_switch_account(
                 client.session,
             )
             if result is not None:
-                rotator.clear_cooldown(current_id, model=model)
                 _last_switch_time = time.time()
             return result is not None
         return bool(
@@ -146,14 +145,19 @@ async def ensure_active_account(model: str | None = None) -> None:
     """
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
+    if account_svc is None:
+        return
+    if not account_svc.list_accounts():
+        raise RequestError(503, "PG 通道未配置账号，请先导入 Cookie")
     current = account_svc.get_active_account() if account_svc else None
     if not current:
-        await try_switch_account(model=model)
+        if not await try_switch_account(model=model):
+            raise RequestError(503, "PG 通道没有可用账号")
     elif (
         rotator and model and not rotator.is_account_available(current.id, model=model)
+        and not await try_switch_account(model=model, failed_account_id=current.id)
     ):
-        # 当前账号对该模型已限流，提前切号
-        await try_switch_account(model=model, failed_account_id=current.id)
+        raise UsageLimitExceeded(f"No available PG account for model '{model}'")
 
 
 def record_rotator_event(
@@ -162,17 +166,14 @@ def record_rotator_event(
     *,
     account_id: str | None = None,
 ) -> None:
-    """记录调度器事件（成功、限流、错误、鉴权异常、登录态失效）。
-
-    ``account_id`` 是给 pool 模式用的：一次请求可能落在任意 worker 自己的账号上，
-    不能拿「全局活跃账号」顶替。单浏览器路径不传，行为不变。
+    """记录调度器事件；在途请求使用自身账号，删除后不回退到当前账号。
     """
     rotator = runtime_state.rotator
     account_service = runtime_state.account_service
     account = None
-    if account_id and account_service is not None:
+    if account_id is not None and account_service is not None:
         account = account_service.get_account(account_id)
-    if account is None and account_service is not None:
+    elif account_service is not None:
         account = account_service.get_active_account()
     if not rotator or account is None:
         return

@@ -23,8 +23,9 @@ export const useSystemStore = defineStore('system', () => {
     loading.value = true
     try {
       stats.value = await systemApi.getStats()
+      return true
     } catch {
-      // ignore
+      return false
     } finally {
       loading.value = false
     }
@@ -33,16 +34,19 @@ export const useSystemStore = defineStore('system', () => {
   async function fetchRotation() {
     try {
       rotation.value = await systemApi.getRotation()
+      return true
     } catch {
-      // ignore
+      return false
     }
   }
   async function checkHealth() {
     try {
       await systemApi.health()
       health.value = 'online'
+      return true
     } catch {
       health.value = 'offline'
+      return false
     }
   }
 

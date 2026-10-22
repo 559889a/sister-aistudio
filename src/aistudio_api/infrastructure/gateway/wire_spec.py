@@ -39,6 +39,16 @@ class TopLevelIndex(IntEnum):
     # 会话 token 是两个字段；服务端截断且不给 token 时页面只能报错，与我们无关。
 
 
+class ToolIndex(IntEnum):
+    """Indexes in a Tool array (matching wire_codec.TOOLS_TEMPLATES)."""
+
+    CODE_EXECUTION = 0
+    FUNCTION_DECLARATIONS = 1
+    GOOGLE_SEARCH = 3
+    URL_CONTEXT = 7
+    GOOGLE_MAPS = 10
+
+
 class PartIndex(IntEnum):
     """Indexes in a Content Part array."""
 

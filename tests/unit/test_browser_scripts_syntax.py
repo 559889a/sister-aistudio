@@ -184,7 +184,7 @@ def test_evaluate_wrapper_expressions_parse_cleanly():
         (
             "SNAPSHOT_GENERATE_JS",
             SNAPSHOT_GENERATE_JS,
-            {"binding": "hello world", "hash": "a" * 64},
+            {"binding": "hello world", "hash": "a" * 64, "bindingId": "request"},
         ),
         (
             "SNAPSHOT_PROBE_JS",
@@ -192,7 +192,7 @@ def test_evaluate_wrapper_expressions_parse_cleanly():
             {"hash": "a" * 64, "timeoutMs": 12000},
         ),
         ("PROMPT_STATE_JS", PROMPT_STATE_JS, None),
-        ("CLEAR_BINDING_JS", CLEAR_BINDING_JS, None),
+        ("CLEAR_BINDING_JS", CLEAR_BINDING_JS, {"bindingId": "request"}),
         ("build_document_start_hooks_js", build_document_start_hooks_js(), None),
         ("STREAMING_INIT_JS", STREAMING_INIT_JS, {"rid": "r1", "url": "http://x"}),
         ("STREAM_CLEANUP_JS", STREAM_CLEANUP_JS, "r1"),
@@ -215,3 +215,94 @@ def test_evaluate_wrapper_expressions_parse_cleanly():
         assert res.returncode == 0, (
             f"SyntaxError in evaluate() wrapper for {name}:\n{res.stderr}"
         )
+
+
+def test_binding_cleanup_preserves_newer_request_and_cancelled_job():
+    runtime = shutil.which("bun") or shutil.which("node")
+    if not runtime:
+        pytest.skip("No JavaScript runtime installed")
+    code = """
+        const assert = (ok) => { if (!ok) throw new Error('binding regression'); };
+        globalThis.window = globalThis;
+        class Textarea {
+            constructor() { this._value = ''; this.isConnected = true; this.events = []; }
+            set value(value) { this._value = value; }
+            get value() { return this._value; }
+            checkVisibility() { return true; }
+            dispatchEvent(event) { this.events.push(event.type); }
+            focus() {}
+            blur() {}
+        }
+        globalThis.HTMLTextAreaElement = Textarea;
+        globalThis.Event = class { constructor(type) { this.type = type; } };
+        globalThis.InputEvent = globalThis.Event;
+        const box = new Textarea();
+        globalThis.document = { querySelectorAll: () => [box] };
+        let resolveProof;
+        globalThis.default_MakerSuite = {
+            snap: () => new Promise(resolve => { resolveProof = resolve; }),
+        };
+        globalThis.__AISTUDIO__ = { service: {}, snapKey: 'snap' };
+    """
+    code += f"const generate = ({SNAPSHOT_GENERATE_JS}); const clear = ({CLEAR_BINDING_JS});\n"
+    code += """
+        (async () => {
+            const pending = generate({ binding: '', hash: 'hash', bindingId: 'old' });
+            while (!resolveProof) await new Promise(resolve => setTimeout(resolve, 0));
+            assert(__AISTUDIO__.binding.id === 'old');
+            assert(box.value === '');
+            assert(box.events.includes('input') && box.events.includes('change'));
+            assert(clear({ bindingId: 'old' }) === 'already_empty');
+            resolveProof('proof');
+            let cancelled = false;
+            try { await pending; } catch (error) { cancelled = error.message.includes('binding_cancelled'); }
+            assert(cancelled);
+            assert(Object.keys(__AISTUDIO__.bindingJobs).length === 0);
+            box.value = 'new binding';
+            __AISTUDIO__.binding = { id: 'new', box, text: box.value };
+            assert(clear({ bindingId: 'old' }) === 'not_owned');
+            assert(box.value === 'new binding');
+            box.value = 'user edited';
+            assert(clear({ bindingId: 'new' }) === 'not_owned');
+            assert(box.value === 'user edited');
+        })().catch(error => { console.error(error); process.exitCode = 1; });
+    """
+    result = subprocess.run([runtime, "-e", code], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+
+
+def test_hook_headers_install_before_bundle_and_service_tap_can_retry():
+    runtime = shutil.which("bun") or shutil.which("node")
+    if not runtime:
+        pytest.skip("No JavaScript runtime installed")
+    code = """
+        const assert = (ok) => { if (!ok) throw new Error('hook regression'); };
+        globalThis.window = globalThis;
+        globalThis.fetch = () => Promise.resolve('fetch');
+        class XHR {
+            open() {}
+            setRequestHeader() {}
+            send() {}
+        }
+        globalThis.XMLHttpRequest = XHR;
+    """
+    code += f"const install = () => ({INSTALL_HOOKS_JS});\n"
+    code += """
+        assert(install() === 'no_default_MakerSuite');
+        fetch('/$rpc/read', { headers: { 'X-Goog-Api-Key': 'page-key' } });
+        assert(__AISTUDIO__.rpcHeaders['x-goog-api-key'] === 'page-key');
+        const service = { A: { snapshot() {} } };
+        const bundle = {
+            snapshotFn: function(service, content) { return service.A.snapshot(content); },
+        };
+        Object.defineProperty(bundle, 'n', { value: () => service, configurable: true, writable: false });
+        globalThis.default_MakerSuite = bundle;
+        assert(install() === 'no_service_tap');
+        Object.defineProperty(bundle, 'n', { value: () => service, writable: true });
+        assert(install().startsWith('hooked:'));
+        bundle.n('unminified-shape');
+        assert(__AISTUDIO__.service === service);
+        assert(__AISTUDIO__.captureVia === 'inject(shape)');
+    """
+    result = subprocess.run([runtime, "-e", code], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr

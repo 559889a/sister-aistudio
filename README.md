@@ -37,6 +37,7 @@ Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 N
 | **缓存用量透传** | 上游报告的缓存 token 数保留到双协议响应：Gemini `usageMetadata.cachedContentTokenCount` / OpenAI `usage.prompt_tokens_details.cached_tokens`；上游未报告时不伪造命中 |
 | **安全过滤强制全关** | 三条通道（pg / express / cookie）四类 Harm 阈值一律注入 `OFF`，客户端传的 `safetySettings` 一律忽略；cookie 通道另对 JAILBREAK 类兜底 `OFF`。注：输入侧预审（生成前拒答）是服务端独立硬过滤，阈值关不掉 |
 | **下游参数容错** | 自动丢弃下游传入的不兼容工具与非标准参数，避免 400 阻断 |
+| **多模态与工具参数保真** | 无浏览器通道保留普通函数/内置工具、停止词、seed、思考配置和输出 Schema；图片在领域层使用原始字节，Gemini/OpenAI 分开统计可见输出与思考 token |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
 | **运行状态持久化** | 模型调用量与 Token 统计（`stats.json`）、账号 429 冷却状态（`rotator_state.json`）自动落盘，重启不丢 |
 | **Web 管理面板** | 仪表盘（请求量 / 成功率 / 429 指标）、账号管理（文本与 JSON 批量导入）、系统设置与运行期设置 |
@@ -114,6 +115,7 @@ $env:AISTUDIO_BROWSER_HEADLESS='false'; .\start.ps1      # 有头浏览器（调
 - `AISTUDIO_UPSTREAM=vertex_express|console_graphql` 可把**默认通道**切到无浏览器上游（`pg/` 前缀仍强制走浏览器）。
 - `express/` 锁 `locations/global`：无位置入口会被 Google 路由到项目默认区（实测 `asia-southeast1`），新模型只在 global 发布，表现为「模型名写错」式的 404；钉 global 需配合 `GOOGLE_PROJECT_ID` 项目号。
 - `express/` 官方 Key **不支持显式缓存创建**：项目级 `cachedContents` 接口实测返回 `401 UNAUTHENTICATED`，明确要求 OAuth2、拒绝 API key（2026-10-22）。本通道不创建显式缓存；隐式缓存是否命中以响应 usage 为准。
+- `cookie/` 的正常首帧是 `data.ui.streamGenerateContentV2=[]`，后续 `results[].path` 条目才带生成内容。网关读取完整流并保留工具/图片/思考与真实结束状态；GraphQL 内嵌 gRPC 403/429 等按真实码返回，不再一律显示为 502。上游未报告 usage 时不伪造 0。
 
 ---
 
@@ -184,11 +186,12 @@ curl -s -X PUT http://127.0.0.1:8080/settings \
 
 ## 单浏览器与账号池（零自动重试）
 
-单台受控 Chromium 承载全部请求；账号池在同一台浏览器上轮换，切换走蓝绿热切（在途流式不中断）。
+单台受控 Chromium 承载全部请求；切号在同一进程内创建独立 Cookie BrowserContext，捕获/签名/发送租用同一个请求上下文。新号就绪后才提交活跃号；旧上下文等待实际在途请求归零才关闭，没有排干截止计时器，切换失败恢复原号。
 
 - **只有 429 驱动换号，且防误杀**：单账号/模型累计第 5 次 429 才打入冷宫（冷却到美西午夜配额重置）；前 4 次只计数不冷却、不换号，成功一次即清零。
 - **故障自愈（零自动重试）**：403/401、页面 fetch/XHR 传输失败、会话挂死、登录页重定向都是**浏览器故障**——杀掉浏览器进程（下次请求自动重建 20~40s），**本次请求不重试**，按真实错误返回（传输失败 = 502），要不要重发由客户端决定。这些错误不给账号加冷却、不换号。
 - **登录态失效**（真被跳到登录页）：凭据已死，按账号隔离 24h 并重启浏览器。
+- 改名/导入保留已有账号身份与创建时间；删除活跃号先切成功再删除，删除末号清空浏览器凭据。解除冷却不抹掉今日用量，太平洋午夜使用 IANA 时区（Windows 依赖 `tzdata`）。
 - 传输失败时日志附 CDP 网络层证据（`net::ERR_*`）便于归因断连。
 
 ---
@@ -206,6 +209,7 @@ curl -s -X PUT http://127.0.0.1:8080/settings \
 判据看完成后请求日志的 **`首包 X s / 总 Y s`**：首包 ≈ 总时长 = bypass 整段返回；首包 ≪ 总时长 = 真流式。
 express/ 通道（Vertex Express）是上游真流式，工具参数还有增量下发。
 静默期日志里只有心跳属正常——项目没有任何「生成等待时长」看门狗，bypass 静默多久都不中止。
+流读取到真正结束才提交统计：每个已出现候选都须有结束状态，首个候选结束不丢其它候选或尾部 usage；客户端取消时在原消费任务中关闭所有下游异步迭代器。
 
 上游在第一帧前断开（页面 `fetch` 抛 `TypeError: Failed to fetch`）时：记一次 `BrowserTransportError`、杀浏览器救后续请求；**本次直接返回 502**，不自动重试。
 
@@ -285,7 +289,9 @@ Python 侧：
 
 ```bash
 uv run ruff check .               # Lint
-uv run pytest                     # 单元测试（基线 581 passed / 0 failed）
+uv run pytest                     # 完整测试；本轮仅跑非安全功能回归，见下方
 ```
+
+本轮功能 Debug 验证：`uv run --no-sync pytest -q --ignore=tests/unit/test_api_auth.py -k "not safety and not sentinel and not signature and not auth and not security"`：642 passed / 29 deselected；生产 `bun x pyright src`、Ruff、前端 lint/type-check/build 与 2 个前端行为回归通过。未执行安全性测试。
 
 > 开发规范与交接状态见 [AGENTS.md](./AGENTS.md)。改完代码需重启 `start.ps1` 才生效。

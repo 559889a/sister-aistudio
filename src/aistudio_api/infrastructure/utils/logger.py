@@ -46,8 +46,9 @@ class UnifiedFormatter(logging.Formatter):
         self.use_color = use_color
 
     def formatTime(
-        self, record: logging.LogRecord, _datefmt: str | None = None
+        self, record: logging.LogRecord, datefmt: str | None = None
     ) -> str:
+        _ = datefmt
         ts = datetime.fromtimestamp(record.created).astimezone()
         return ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}{ts:%z}"
 

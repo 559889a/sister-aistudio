@@ -32,10 +32,11 @@ def get_pacific_date_key(ts: float | None = None) -> str:
     """获取美西太平洋时间（America/Los_Angeles）日期键值 YYYY-MM-DD。"""
     try:
         tz = ZoneInfo("America/Los_Angeles")
-        dt = datetime.fromtimestamp(ts or time.time(), tz=tz)
+        dt = datetime.fromtimestamp(time.time() if ts is None else ts, tz=tz)
         return dt.strftime("%Y-%m-%d")
     except Exception:
-        dt = datetime.fromtimestamp((ts or time.time()) - 28800, tz=UTC)
+        current_ts = time.time() if ts is None else ts
+        dt = datetime.fromtimestamp(current_ts - 28800, tz=UTC)
         return dt.strftime("%Y-%m-%d")
 
 
@@ -47,7 +48,7 @@ def get_seconds_until_pacific_midnight() -> float:
         tomorrow_dt = (now_dt + timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        return max(0.0, (tomorrow_dt - now_dt).total_seconds())
+        return max(0.0, tomorrow_dt.timestamp() - now_dt.timestamp())
     except Exception:
         # 保底计算
         now = time.time()
@@ -73,6 +74,7 @@ class AccountStats:
     requests: int = 0
     success: int = 0
     rate_limited: int = 0
+    global_rate_limited_streak: int = 0
     errors: int = 0
     auth_errors: int = 0
     last_used: float = 0.0
@@ -94,6 +96,7 @@ class AccountStats:
             "requests": self.requests,
             "success": self.success,
             "rate_limited": self.rate_limited,
+            "global_rate_limited_streak": self.global_rate_limited_streak,
             "errors": self.errors,
             "auth_errors": self.auth_errors,
             "last_used": self.last_used,
@@ -163,6 +166,7 @@ class AccountStats:
             success=_as_int(data.get("success")),
             rate_limited=_as_int(data.get("rate_limited")),
             errors=_as_int(data.get("errors")),
+            global_rate_limited_streak=_as_int(data.get("global_rate_limited_streak")),
             auth_errors=_as_int(data.get("auth_errors")),
             last_used=_as_float(data.get("last_used")),
             last_rate_limited=_as_float(data.get("last_rate_limited")),
@@ -185,18 +189,28 @@ class AccountStats:
         model = normalize_model_key(model)
         if self.rate_limited_date_la and self.rate_limited_date_la < current_la:
             self.rate_limited_date_la = None
+            self.global_rate_limited_streak = 0
+        if (
+            self.last_rate_limited
+            and get_pacific_date_key(self.last_rate_limited) < current_la
+        ):
+            self.global_rate_limited_streak = 0
 
-        if model:
-            req_date = self.model_requests_dates.get(model)
+        models = (
+            {model} if model
+            else set(self.model_requests_dates) | set(self.model_rate_limited_dates)
+        )
+        for key in models:
+            req_date = self.model_requests_dates.get(key)
             if req_date and req_date < current_la:
-                self.model_requests[model] = 0
-                self.model_requests_dates[model] = current_la
+                self.model_requests[key] = 0
+                self.model_requests_dates[key] = current_la
 
-            limit_date = self.model_rate_limited_dates.get(model)
+            limit_date = self.model_rate_limited_dates.get(key)
             if limit_date and limit_date < current_la:
-                self.model_rate_limited_dates.pop(model, None)
-                self.model_cooldowns.pop(model, None)
-                self.model_rate_limited.pop(model, None)
+                self.model_rate_limited_dates.pop(key, None)
+                self.model_cooldowns.pop(key, None)
+                self.model_rate_limited.pop(key, None)
 
     def is_available(
         self, model: str | None = None, *, ignore_auth_cooldown: bool = False
@@ -204,7 +218,9 @@ class AccountStats:
         """检查账号在指定模型下是否可用（美西 0 点自动刷新）。"""
         now = time.time()
         if self.session_expired:
-            return False
+            if self.auth_cooldown > now:
+                return False
+            self.session_expired = False
         if not ignore_auth_cooldown and self.auth_cooldown > now:
             return False
         model = normalize_model_key(model)
@@ -243,9 +259,11 @@ class AccountStats:
         self.auth_errors = 0
         self.auth_cooldown = 0.0
         model = normalize_model_key(model)
+        self._check_date_reset(model, get_pacific_date_key(now))
+        self.global_rate_limited_streak = 0
+        self.rate_limited_date_la = None
         if model:
             la_date = get_pacific_date_key(now)
-            self._check_date_reset(model, la_date)
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
             self.model_requests_dates[model] = la_date
             self.model_cooldowns.pop(model, None)
@@ -262,12 +280,13 @@ class AccountStats:
         now = time.time()
         self.requests += 1
         self.rate_limited += 1
+        self._check_date_reset(model, get_pacific_date_key(now))
         self.last_rate_limited = now
+        self.last_used = now
         la_date = get_pacific_date_key(now)
         model = normalize_model_key(model)
 
         if model:
-            self._check_date_reset(model, la_date)
             limit_count = self.model_rate_limited.get(model, 0) + 1
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
             self.model_requests_dates[model] = la_date
@@ -276,19 +295,23 @@ class AccountStats:
             if limit_count >= RATE_LIMITED_COOLDOWN_THRESHOLD:
                 self.model_cooldowns[model] = now + get_seconds_until_pacific_midnight()
         else:
-            if self.rate_limited >= RATE_LIMITED_COOLDOWN_THRESHOLD:
+            self.global_rate_limited_streak += 1
+            if self.global_rate_limited_streak >= RATE_LIMITED_COOLDOWN_THRESHOLD:
                 self.rate_limited_date_la = la_date
 
     def record_error(self, model: str | None = None) -> None:
         self.requests += 1
         self.errors += 1
-        self.last_used = time.time()
+        now = time.time()
+        self.last_used = now
         model = normalize_model_key(model)
+        self._check_date_reset(model, get_pacific_date_key(now))
         if model:
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
+            self.model_requests_dates[model] = get_pacific_date_key(now)
 
     def record_session_expired(self, model: str | None = None) -> None:
-        """记录账号登录态失效（被重定向到登录页），将该账号隔离并在未更新前禁止使用。"""
+        """记录账号登录态失效，隔离 24 小时或直至用户重置/重新导入。"""
         now = time.time()
         self.requests += 1
         self.errors += 1
@@ -300,8 +323,10 @@ class AccountStats:
         # 隔离 24 小时或直至用户重新导入/手动重置
         self.auth_cooldown = now + 86400.0
         model = normalize_model_key(model)
+        self._check_date_reset(model, get_pacific_date_key(now))
         if model:
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
+            self.model_requests_dates[model] = get_pacific_date_key(now)
 
     def clear_cooldown(self, model: str | None = None) -> None:
         """手动清除冷却与 429/403/失效锁定。"""
@@ -314,15 +339,12 @@ class AccountStats:
             self.model_cooldowns.pop(model, None)
             self.model_rate_limited_dates.pop(model, None)
             self.model_rate_limited.pop(model, None)
-            self.model_requests.pop(model, None)
-            self.model_requests_dates.pop(model, None)
         else:
             self.rate_limited_date_la = None
+            self.global_rate_limited_streak = 0
             self.model_cooldowns.clear()
             self.model_rate_limited_dates.clear()
             self.model_rate_limited.clear()
-            self.model_requests.clear()
-            self.model_requests_dates.clear()
 
 
 class AccountRotator:
@@ -407,6 +429,7 @@ class AccountRotator:
         current_la = get_pacific_date_key()
         for account in self._store.list_accounts():
             stats = self._stats.get(account.id, AccountStats(account_id=account.id))
+            stats._check_date_reset(None, current_la)
             result[account.id] = {
                 "name": account.name,
                 "email": account.email,
@@ -571,7 +594,10 @@ class AccountRotator:
         stats = self._stats[account_id]
         stats.record_rate_limited(model)
         norm_m = normalize_model_key(model)
-        count = stats.model_rate_limited.get(norm_m, 0) if norm_m else stats.rate_limited
+        count = (
+            stats.model_rate_limited.get(norm_m, 0)
+            if norm_m else stats.global_rate_limited_streak
+        )
         logger.warning(
             "账号 %s 在模型 %s 第 %d 次 429（累计 %d 次打入冷宫）",
             account_id,
@@ -596,7 +622,7 @@ class AccountRotator:
         if account_id not in self._stats:
             self._stats[account_id] = AccountStats(account_id=account_id)
         self._stats[account_id].record_session_expired(model)
-        logger.error("账号 %s 登录态失效，已被永久禁用直至重新导入凭据", account_id)
+        logger.error("账号 %s 登录态失效，已隔离 24 小时或直至重新导入凭据", account_id)
         self.save_state()
 
     def clear_cooldown(self, account_id: str, model: str | None = None) -> None:

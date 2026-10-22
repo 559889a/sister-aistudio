@@ -4,6 +4,7 @@ import type { AccountWithStats } from '@/types'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
+import FormInput from '@/components/ui/FormInput.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -16,11 +17,12 @@ const emit = defineEmits<{
 
 const accountsStore = useAccountsStore()
 const inputName = ref('')
+const saving = ref(false)
 
 watch(
-  () => props.account,
-  (acc) => {
-    if (acc) {
+  () => [props.modelValue, props.account] as const,
+  ([open, acc]) => {
+    if (open && acc) {
       inputName.value = acc.name || ''
     }
   },
@@ -28,12 +30,18 @@ watch(
 )
 
 async function handleSave() {
-  if (!props.account) return
+  if (!props.account || saving.value) return
   const trimmed = inputName.value.trim()
   if (!trimmed) return
 
-  await accountsStore.updateAccountName(props.account.id, trimmed)
-  emit('update:modelValue', false)
+  saving.value = true
+  try {
+    if (await accountsStore.updateAccountName(props.account.id, trimmed)) {
+      emit('update:modelValue', false)
+    }
+  } finally {
+    saving.value = false
+  }
 }
 </script>
 
@@ -41,26 +49,23 @@ async function handleSave() {
   <Modal
     :model-value="modelValue"
     title="修改账号名称"
-    @update:model-value="emit('update:modelValue', $event)"
+    @update:model-value="!saving && emit('update:modelValue', $event)"
   >
     <div class="space-y-4">
-      <div class="space-y-1.5">
-        <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
-          账号名称 / 备注
-        </label>
-        <input
-          v-model="inputName"
-          type="text"
-          placeholder="例如: 主账号 (Pro)、备用账号 1 等"
-          class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-        >
-      </div>
+      <FormInput
+        :model-value="inputName"
+        label="账号名称 / 备注"
+        placeholder="例如: 主账号 (Pro)、备用账号 1 等"
+        :disabled="saving"
+        @update:model-value="inputName = String($event ?? '')"
+      />
     </div>
 
     <template #footer>
       <Button
         variant="ghost"
         size="sm"
+        :disabled="saving"
         @click="emit('update:modelValue', false)"
       >
         取消
@@ -68,6 +73,7 @@ async function handleSave() {
       <Button
         variant="primary"
         size="sm"
+        :loading="saving"
         :disabled="!inputName.trim()"
         @click="handleSave"
       >

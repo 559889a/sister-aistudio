@@ -457,3 +457,28 @@ def test_modify_body_handles_tool_config_semantically_and_preserves_evergreen_ur
     body_none = json.loads(rewritten_none)
     assert body_none[6] is None
     assert body_none[7] is None
+
+
+def test_codec_keeps_part_metadata_and_structural_payload_roundtrips():
+    from aistudio_api.infrastructure.gateway.wire_types import AistudioPart
+
+    codec = AistudioWireCodec()
+    parts = [
+        AistudioPart(text="", thought_signature="sig"),
+        AistudioPart(text="thinking", thought=True, thought_signature="sig"),
+        AistudioPart(inline_data=("image/png", "YWJj"), thought=True, thought_signature="sig"),
+        AistudioPart(file_id="file", thought_signature="sig"),
+        AistudioPart(function_call=("f", {"nested": [None, False, {"x": []}]}, "call"), thought_signature="sig"),
+        AistudioPart(function_response=("f", {"result": 1}, "call"), thought_signature="sig"),
+        AistudioPart(executable_code=("PYTHON", "print(1)"), thought_signature="sig"),
+        AistudioPart(code_execution_result=("OUTCOME_FAILED", "error"), thought_signature="sig"),
+        AistudioPart(code_execution_result=("OUTCOME_DEADLINE_EXCEEDED", "late"), thought_signature="sig"),
+    ]
+    for part in parts:
+        wire = part.to_wire()
+        decoded = codec._decode_part(wire)
+        assert decoded.to_wire() == wire
+        assert decoded.thought == part.thought
+        assert decoded.thought_signature == "sig"
+    response = codec._decode_part(parts[5].to_wire())
+    assert response.function_response[2] == "call"

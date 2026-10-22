@@ -692,9 +692,15 @@ class _FakeReplayService:
 
 
 async def _run_client_generate(captured: Any, raw: str) -> ModelOutput:
+    from unittest.mock import AsyncMock, MagicMock
+
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
+    from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
     client = AIStudioClient(port=9222)
+    context = SessionContext(page=MagicMock(), snap_key="snap", auth_user="0", auth_file=None, base_template={})
+    client.session.ensure_ready = AsyncMock(return_value=context)
+    client.session.clear_prompt = AsyncMock()
     client._capture_service = _FakeCaptureService(captured)  # type: ignore[assignment]
     client._replay_service = _FakeReplayService(raw)  # type: ignore[assignment]
     return await client.generate_content(model="m", capture_prompt="hi", contents=[])

@@ -134,36 +134,27 @@ def resolve_rotator_state_file() -> Path:
     return resolve_data_dir() / "rotator_state.json"
 
 
-_AUTH_SEARCH_ROOTS = [
-    _DEFAULT_DATA_DIR,  # 项目内 data/ 目录
-]
-
-
 def discover_auth_file() -> str | None:
     override = os.getenv("AISTUDIO_AUTH_FILE")
     if override:
         return override
-
-    for root in _AUTH_SEARCH_ROOTS:
-        if not root.is_dir():
-            continue
-        # 优先从 registry.json 读取活跃账号
-        registry_path = root / "accounts" / "registry.json"
-        if registry_path.exists():
-            try:
-                registry = json.loads(registry_path.read_text(encoding="utf-8"))
-                active_id = registry.get("active_account_id")
-                if active_id:
-                    auth_path = root / "accounts" / active_id / "auth.json"
-                    if auth_path.exists():
-                        return str(auth_path)
-            except (json.JSONDecodeError, KeyError):
-                pass
-        # 回退：扫描 data/ 目录下的 .json 文件
-        for file in root.iterdir():
-            if file.suffix == ".json":
-                return str(file)
-    return None
+    accounts_override = os.getenv("AISTUDIO_ACCOUNTS_DIR")
+    data_override = os.getenv("AISTUDIO_DATA_DIR")
+    data_dir = Path(data_override) if data_override else _DEFAULT_DATA_DIR
+    accounts_dir = Path(accounts_override) if accounts_override else data_dir / "accounts"
+    registry_path = accounts_dir / "registry.json"
+    if registry_path.is_file():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            active_id = registry.get("active_account_id")
+            if active_id:
+                auth_path = accounts_dir / active_id / "auth.json"
+                if auth_path.is_file():
+                    return str(auth_path)
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    legacy_auth = data_dir / "auth.json"
+    return str(legacy_auth) if legacy_auth.is_file() else None
 
 
 def discover_proxy_url() -> str | None:

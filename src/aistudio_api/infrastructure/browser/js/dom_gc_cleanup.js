@@ -12,8 +12,6 @@
         });
     } catch (e) {}
 
-    const ta = document.querySelector('textarea');
-    if (ta) { ta.value = ''; }
     try {
         if (typeof window.gc === 'function') {
             window.gc();

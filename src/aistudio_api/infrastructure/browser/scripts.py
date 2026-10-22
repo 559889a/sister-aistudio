@@ -42,7 +42,7 @@ def build_document_start_hooks_js() -> str:
         "    const install = () => {\n"
         f"        try {{ return ({install}); }} catch (e) {{ return 'err:' + String(e); }}\n"
         "    };\n"
-        "    const tick = () => String(install()).indexOf('hooked:') === 0;\n"
+        "    const tick = () => { const state = String(install()); return state.indexOf('hooked:') === 0 || state === 'already_hooked'; };\n"
         "    if (tick()) return 'done';\n"
         "    const timer = setInterval(() => {\n"
         "        if (tick()) clearInterval(timer);\n"
@@ -53,9 +53,11 @@ def build_document_start_hooks_js() -> str:
     )
 
 
-def build_snapshot_args(*, binding: str, content_hash: str) -> dict[str, object]:
+def build_snapshot_args(
+    *, binding: str, content_hash: str, binding_id: str
+) -> dict[str, object]:
     """SNAPSHOT_GENERATE_JS 的参数：binding 与哈希输入必须是同一份文本。"""
-    return {"binding": binding, "hash": content_hash}
+    return {"binding": binding, "hash": content_hash, "bindingId": binding_id}
 
 
 def build_snapshot_probe_args(*, content_hash: str, timeout_ms: int) -> dict[str, object]:

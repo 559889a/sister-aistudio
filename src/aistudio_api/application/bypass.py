@@ -33,6 +33,7 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
     WIRE_CANDIDATE_CONTENT,
     WIRE_CHUNK_CANDIDATES_INDEX,
     ResponsePart,
+    _iter_response_chunks,
     parse_response_part,
 )
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
@@ -300,7 +301,7 @@ def _content_from_mapping(args: object) -> str | None:
                 if joined:
                     return joined
         string_entries = [
-            value for key, value in args.items() if isinstance(value, str)
+            value for value in args.values() if isinstance(value, str)
         ]
         return string_entries[0] if len(string_entries) == 1 else None
 
@@ -779,34 +780,16 @@ def extract_from_parts(
     )
 
 
-def _looks_like_response_chunk(value: object) -> bool:
-    return isinstance(value, list) and len(value) > 0 and isinstance(value[0], list)
 
 
-def _iter_response_chunks(outer: object) -> list[list[object]]:
-    """把响应外层的各种包裹形状统一拆成 chunk 列表（与 wire_parser 同口径）。"""
-    if isinstance(outer, list) and outer:
-        if len(outer) == 1 and isinstance(outer[0], list):
-            inner = outer[0]
-            nested = [item for item in inner if _looks_like_response_chunk(item)]
-            if nested:
-                return [item for item in nested if isinstance(item, list)]
-        top_level = [item for item in outer if _looks_like_response_chunk(item)]
-        if len(top_level) > 1:
-            return [item for item in top_level if isinstance(item, list)]
-    if _looks_like_response_chunk(outer) and isinstance(outer, list):
-        return [outer]
-    return []
-
-
-def iter_wire_parts(chunk: object) -> list[object]:
+def iter_wire_parts(chunk: object, candidate_index: int = 0) -> list[object]:
     """从响应 chunk 里按原始顺序取出 parts 数组（不做任何合并/分类）。"""
     if not isinstance(chunk, list) or len(chunk) <= WIRE_CHUNK_CANDIDATES_INDEX:
         return []
     container = chunk[WIRE_CHUNK_CANDIDATES_INDEX]
-    if not isinstance(container, list) or not container:
+    if not isinstance(container, list) or candidate_index >= len(container):
         return []
-    candidate = container[0]
+    candidate = container[candidate_index]
     if not isinstance(candidate, list) or len(candidate) <= WIRE_CANDIDATE_CONTENT:
         return []
     content = candidate[WIRE_CANDIDATE_CONTENT]
@@ -816,15 +799,16 @@ def iter_wire_parts(chunk: object) -> list[object]:
     return parts if isinstance(parts, list) else []
 
 
-def iter_response_parts(raw: str) -> list[ResponsePart]:
+def iter_response_parts(raw: str, candidate_index: int = 0) -> list[ResponsePart]:
     """非流式响应原文 → 按出现顺序解码后的 parts。"""
     parsed = extract_outer_json(raw)
     if not parsed:
         return []
     result: list[ResponsePart] = []
-    for chunk in _iter_response_chunks(parsed[0]):
-        for raw_part in iter_wire_parts(chunk):
-            result.append(parse_response_part(raw_part))
+    for outer in parsed:
+        for chunk in _iter_response_chunks(outer):
+            for raw_part in iter_wire_parts(chunk, candidate_index):
+                result.append(parse_response_part(raw_part))
     return result
 
 
@@ -857,13 +841,14 @@ def restore_non_stream(
     output: ModelOutput,
     raw_text: str,
     plan: BypassPlan,
+    candidate_index: int = 0,
 ) -> ModelOutput:
     """非流式响应还原：从 parts 里取回正文，处理 prefer/required。"""
-    parts = iter_response_parts(raw_text)
+    parts = iter_response_parts(raw_text, candidate_index)
     extraction = extract_from_parts(
         parts, plan.tool_name, merge_plain_text=plan.merge_outside
     )
-    candidate = output.candidates[0] if output.candidates else None
+    candidate = output.candidates[candidate_index] if len(output.candidates) > candidate_index else None
     if candidate is not None:
         # 合成工具的调用不能漏给客户端（哪怕这次没取到内容）
         candidate.function_calls = [

@@ -19,7 +19,7 @@ export interface PollingHandle {
 }
 
 interface ActiveTask {
-  fn: () => void | Promise<void>
+  callbacks: Set<() => void | Promise<void>>
   intervalMs: number
   maxBackoffMs: number
   timer?: number
@@ -45,7 +45,6 @@ function setupGlobalVisibilityListener() {
         if (!task.paused) {
           task.failureCount = 0
           void runTask(task)
-          scheduleNext(task)
         }
       }
     }
@@ -56,18 +55,22 @@ async function runTask(task: ActiveTask) {
   if (task.running || (typeof document !== 'undefined' && document.hidden)) return
   task.running = true
   try {
-    await task.fn()
+    const results = await Promise.allSettled(Array.from(task.callbacks, (fn) => Promise.resolve().then(fn)))
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
     task.failureCount = 0
   } catch (err) {
     task.failureCount++
     console.debug('[usePolling] task execution error (consecutive failures: %d):', task.failureCount, err)
   } finally {
     task.running = false
+    scheduleNext(task)
   }
 }
 
 function scheduleNext(task: ActiveTask) {
-  if (task.timer || task.paused || (typeof document !== 'undefined' && document.hidden)) return
+  if (typeof window === 'undefined' || !window.location.protocol.startsWith('http')) return
+  if (task.timer || task.paused || task.running || document.hidden) return
 
   let delay = task.intervalMs
   if (task.failureCount > 1) {
@@ -76,9 +79,7 @@ function scheduleNext(task: ActiveTask) {
 
   task.timer = window.setTimeout(() => {
     task.timer = undefined
-    void runTask(task).then(() => {
-      scheduleNext(task)
-    })
+    void runTask(task)
   }, delay)
 }
 
@@ -106,22 +107,22 @@ export function usePolling(
   const immediate = options.immediate !== false
   const maxBackoffMs = options.maxBackoffMs || 60000
 
-  const task: ActiveTask = {
-    fn,
+  const existing = activeTasks.get(taskId)
+  const task: ActiveTask = existing ?? {
+    callbacks: new Set(),
     intervalMs,
     maxBackoffMs,
     paused: false,
     running: false,
     failureCount: 0,
   }
+  task.callbacks.add(fn)
   activeTasks.set(taskId, task)
 
-  if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+  if (!existing && typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
     if (!document.hidden) {
       if (immediate) {
-        void runTask(task).then(() => {
-          scheduleNext(task)
-        })
+        void runTask(task)
       } else {
         scheduleNext(task)
       }
@@ -144,8 +145,12 @@ export function usePolling(
   }
 
   onUnmounted(() => {
-    stopTaskTimer(task)
-    activeTasks.delete(taskId)
+    task.callbacks.delete(fn)
+    if (task.callbacks.size === 0) {
+      task.paused = true
+      stopTaskTimer(task)
+      activeTasks.delete(taskId)
+    }
   })
 
   return handle

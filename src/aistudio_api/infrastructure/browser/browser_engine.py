@@ -526,6 +526,14 @@ def _create_windows_job_object() -> int | None:
         if win_dll is None:
             return None
         kernel32 = win_dll("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             return None
@@ -552,11 +560,14 @@ def _assign_process_to_job(job_handle: int | None, proc_handle: int) -> bool:
         return False
     try:
         import ctypes
+        from ctypes import wintypes
 
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is None:
             return False
         kernel32 = win_dll("kernel32", use_last_error=True)
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
         return bool(kernel32.AssignProcessToJobObject(job_handle, proc_handle))
     except Exception as e:
         log.debug("将进程分配至 Windows Job Object 失败: %s", e)
@@ -641,10 +652,13 @@ class ChromiumProcess:
         if self.job is not None:
             try:
                 import ctypes
+                from ctypes import wintypes
 
                 win_dll = getattr(ctypes, "WinDLL", None)
                 if win_dll is not None:
                     kernel32 = win_dll("kernel32", use_last_error=True)
+                    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                    kernel32.CloseHandle.restype = wintypes.BOOL
                     kernel32.CloseHandle(self.job)
             except Exception:
                 pass

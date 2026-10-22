@@ -161,10 +161,13 @@ def test_windows_job_object_lifecycle():
         assert proc.poll() is None
     finally:
         import ctypes
+        from ctypes import wintypes
 
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is not None:
             kernel32 = win_dll("kernel32", use_last_error=True)
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
             kernel32.CloseHandle(job)
         time.sleep(0.2)
         assert proc.poll() is not None

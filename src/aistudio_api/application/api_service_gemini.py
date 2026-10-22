@@ -9,13 +9,14 @@ import time
 import traceback
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NoReturn
 
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 
-from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
+from aistudio_api.api.responses import to_gemini_parts
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
@@ -227,6 +228,12 @@ async def _capture_failure_evidence(
     )
 
 
+def _request_account_id(client: AIStudioClient) -> str:
+    session = getattr(client, "_session", None)
+    auth_file = getattr(session, "last_request_auth_file", None)
+    return Path(auth_file).parent.name if isinstance(auth_file, str) and auth_file else ""
+
+
 async def handle_attempt_exception(
     exc: Exception,
     *,
@@ -234,6 +241,7 @@ async def handle_attempt_exception(
     normalized_model: str | None,
     client: AIStudioClient,
     attempt_elapsed_s: float | None = None,
+    account_id: str | None = None,
 ) -> NoReturn:
     """错误归类 + 唯一自愈动作（重启浏览器）+ 抛出真实错误（绝不重试）。
 
@@ -247,11 +255,20 @@ async def handle_attempt_exception(
     - 登录态失效（SessionExpiredError）凭据已死，按账号隔离 24h 并重启浏览器。
     """
     target_model = normalized_model or model_path
+    session = getattr(client, "_session", None)
+    request_account_id = _request_account_id(client) if account_id is None else account_id
+
+    def record_account(event: str) -> None:
+        if session is not None:
+            record_rotator_event(event, model=target_model, account_id=request_account_id)
+
+    if isinstance(exc, HTTPException):
+        raise exc
 
     async def _restart_browser() -> None:
         """杀掉浏览器进程，下次请求 ensure_ready 重建。"""
         client.clear_templates()
-        session = client._session
+        session = getattr(client, "_session", None)
         if session is not None:
             try:
                 await session._close_internal()
@@ -262,10 +279,13 @@ async def handle_attempt_exception(
         raise HTTPException(
             400, detail={"message": str(exc), "type": "bad_request"}
         ) from exc
+    status = exc.status if isinstance(exc, RequestError) else None
+    limited = isinstance(exc, UsageLimitExceeded) or status == 429
+    runtime_state.record(target_model, "rate_limited" if limited else "errors")
 
     if isinstance(exc, SessionExpiredError):
         logger.warning("%s账号会话失效，已被重定向到登录页: %s", _rid(), exc)
-        record_rotator_event("session_expired", model=target_model)
+        record_account("session_expired")
         await _capture_failure_evidence(
             exc, client=client, http_status=401, error_type="auth_error",
             model=target_model, attempt_elapsed_s=attempt_elapsed_s,
@@ -284,7 +304,7 @@ async def handle_attempt_exception(
             "%s账号 403 权限拒绝%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
         # 403/401 不是配额问题（2026-10-19 拍板）：不换号、不加账号冷却，按浏览器故障重启
-        record_rotator_event("error", model=target_model)
+        record_account("error")
         await _capture_failure_evidence(
             exc, client=client, http_status=403, error_type="auth_error",
             model=target_model, attempt_elapsed_s=attempt_elapsed_s,
@@ -295,14 +315,13 @@ async def handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, UsageLimitExceeded):
-        runtime_state.record(target_model, "rate_limited")
         # 429 是唯一的换号驱动（2026-10-20 拍板）：第 5 次才冷却（见 account_rotator）
-        record_rotator_event("rate_limited", model=target_model)
+        record_account("rate_limited")
         logger.warning("%s429 触发限额: model=%s", _rid(), target_model)
         raise HTTPException(
             429,
             detail={
-                "message": f"All accounts reached daily quota for model '{target_model}'. Quota resets at 00:00 PST.",
+                "message": clean_upstream_error_message(str(exc)),
                 "type": "rate_limit_exceeded",
             },
         ) from exc
@@ -310,7 +329,7 @@ async def handle_attempt_exception(
     if isinstance(exc, BrowserTransportError):
         # 页面里的 fetch/XHR 网络失败（Failed to fetch 这类）：这台浏览器坏了。
         # 重启它救**后续**请求；本次请求 502，客户端要重试就重发一条新请求。
-        record_rotator_event("error", model=target_model)
+        record_account("error")
         logger.warning(
             "%s浏览器页面请求失败%s，后台重启浏览器，本次请求 502: %s",
             _rid(),
@@ -338,8 +357,7 @@ async def handle_attempt_exception(
             _fmt_elapsed(attempt_elapsed_s),
             exc,
         )
-        client.clear_templates()
-        record_rotator_event("error", model=target_model)
+        record_account("error")
         await _capture_failure_evidence(
             exc, client=client, http_status=502, error_type="upstream_error",
             model=target_model, attempt_elapsed_s=attempt_elapsed_s,
@@ -352,6 +370,7 @@ async def handle_attempt_exception(
     if isinstance(exc, RequestError):
         clean_msg = clean_upstream_error_message(str(exc))
         status_code = exc.status if exc.status > 0 else 500
+        record_account("rate_limited" if status_code == 429 else "error")
         logger.warning(
             "%sGemini 上游请求错误 (%d)%s: %s",
             _rid(),
@@ -370,13 +389,16 @@ async def handle_attempt_exception(
             exc, client=client, http_status=status_code, error_type=error_type,
             model=target_model, attempt_elapsed_s=attempt_elapsed_s,
         )
+        if session is not None and exc.raw_upstream_body and (
+            status_code in (401, 403) or status_code >= 500
+        ):
+            await _restart_browser()
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
         ) from exc
 
     if isinstance(exc, AistudioError):
-        runtime_state.record(target_model, "errors")
-        record_rotator_event("error", model=target_model)
+        record_account("error")
         logger.warning(
             "%sGemini 服务端异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
@@ -388,8 +410,7 @@ async def handle_attempt_exception(
             500, detail={"message": str(exc), "type": "server_error"}
         ) from exc
 
-    runtime_state.record(target_model, "errors")
-    record_rotator_event("error", model=target_model)
+    record_account("error")
     logger.error(
         "%sGemini 未知严重异常%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
     )
@@ -439,7 +460,8 @@ async def generate_content_output(
 
     失败时按既有规则抛 HTTPException——OpenAI 桥会把它翻成 OpenAI 错误体。
     """
-    await ensure_active_account(model=model_path)
+    if getattr(client, "_session", None) is not None:
+        await ensure_active_account(model=model_path)
     prepared: PreparedRequest | None = None
     attempt_started = time.perf_counter()
     try:
@@ -468,7 +490,8 @@ async def generate_content_output(
             sanitize_plain_text=False,
         )
 
-        record_rotator_event("success", model=normalized.model)
+        if getattr(client, "_session", None) is not None:
+            record_rotator_event("success", model=normalized.model, account_id=_request_account_id(client))
         runtime_state.record(normalized.model, "success", output.usage)
         logger.debug(
             "%s上游返回: 输入Tokens=%s, 输出Tokens=%s",
@@ -484,6 +507,7 @@ async def generate_content_output(
             normalized_model=prepared.normalized.model if prepared else None,
             client=client,
             attempt_elapsed_s=time.perf_counter() - attempt_started,
+            account_id=_request_account_id(client),
         )
 
 
@@ -567,6 +591,7 @@ def format_sse_event(
     model_version: str | None = None,
     response_id: str | None = None,
     thought_signature: str | None = None,
+    candidate_index: int = 0,
 ) -> str | None:
     """Format a single Gemini streaming event into SSE chunk string."""
     if not text:
@@ -591,6 +616,12 @@ def format_sse_event(
         ]
         if thought_signature and parts:
             parts[0]["thoughtSignature"] = thought_signature
+    elif event_type == "function_responses":
+        responses = text if isinstance(text, list) else []
+        parts = [part.model_dump(mode="json", exclude_none=True)
+                 for part in to_gemini_parts("", function_responses=responses)]
+    elif event_type == "code_output":
+        parts = [{"text": str(text)}]
     elif event_type == "images":
         img_list = text if isinstance(text, list) else []
         parts = [
@@ -611,7 +642,7 @@ def format_sse_event(
         return None
 
     payload: dict[str, object] = {
-        "candidates": [{"content": {"role": "model", "parts": parts}, "index": 0}]
+        "candidates": [{"content": {"role": "model", "parts": parts}, "index": candidate_index}]
     }
     if model_version:
         payload["modelVersion"] = model_version
@@ -620,37 +651,6 @@ def format_sse_event(
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
-def format_sse_usage(
-    final_usage: dict[str, object] | None,
-    *,
-    finish_reason: str = "STOP",
-    model_version: str | None = None,
-    response_id: str | None = None,
-) -> str:
-    """Format final completion usage metadata into SSE chunk string."""
-    effective_usage = final_usage or {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-    }
-    usage_dict = to_gemini_usage_metadata(effective_usage).model_dump(
-        mode="json", exclude_none=True
-    )
-    payload: dict[str, object] = {
-        "candidates": [
-            {
-                "content": {"role": "model", "parts": []},
-                "finishReason": finish_reason,
-                "index": 0,
-            }
-        ],
-        "usageMetadata": usage_dict,
-    }
-    if model_version:
-        payload["modelVersion"] = model_version
-    if response_id:
-        payload["responseId"] = response_id
-    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
 def format_sse_error(exc: Exception) -> str:
@@ -683,15 +683,21 @@ async def stream_raw_events(
     ``client.stream_generate_content`` 的事件；失败时 ``handle_attempt_exception``
     抛出最终错误（由 Gemini SSE / OpenAI SSE 各自渲染成错误帧）。
     """
-    await ensure_active_account(model=model_path)
+    if getattr(client, "_session", None) is not None:
+        await ensure_active_account(model=model_path)
     prepared: PreparedRequest | None = None
     attempt_started = time.perf_counter()
+    request_account_id = ""
+    final_usage: dict[str, object] | None = None
+    observed_candidates: set[int] = set()
+    finished_candidates: set[int] = set()
+    source = None
     try:
         prepared = prepare_gemini_request(req, model_path)
         normalized = prepared.normalized
         yield ("attempt", 1)
         yield ("prepared", prepared)
-        async for event_type, text in client.stream_generate_content(
+        source = client.stream_generate_content(
             model=normalized.model,
             capture_prompt=normalized.capture_prompt,
             capture_images=normalized.capture_images,
@@ -706,8 +712,24 @@ async def stream_raw_events(
             max_tokens=normalized.max_tokens,
             generation_config_overrides=normalized.generation_config_overrides,
             sanitize_plain_text=False,
-        ):
+        )
+        async for event_type, text in source:
+            request_account_id = _request_account_id(client)
+            if event_type == "usage" and isinstance(text, dict):
+                final_usage = text
+            kind, payload, index = event_type, text, 0
+            if event_type == "candidate_event" and isinstance(text, dict):
+                kind, payload, index = str(text["type"]), text.get("payload"), int(text["index"])
+            if kind in ("body", "thinking", "images", "reasoning_images", "tool_calls", "function_responses", "code_output", "finish_reason"):
+                observed_candidates.add(index)
+            if kind == "finish_reason" and payload not in (None, 0, 22):
+                finished_candidates.add(index)
             yield (event_type, text)
+        if not finished_candidates or observed_candidates - finished_candidates:
+            raise RequestError(502, "stream ended without finishReason")
+        if getattr(client, "_session", None) is not None:
+            record_rotator_event("success", model=normalized.model, account_id=request_account_id)
+        runtime_state.record(normalized.model, "success", final_usage)
     except Exception as exc:
         await handle_attempt_exception(
             exc,
@@ -715,7 +737,11 @@ async def stream_raw_events(
             normalized_model=prepared.normalized.model if prepared else None,
             client=client,
             attempt_elapsed_s=time.perf_counter() - attempt_started,
+            account_id=_request_account_id(client) or request_account_id,
         )
+    finally:
+        if source is not None:
+            await source.aclose()
 
 
 def _build_gemini_streaming_response(
@@ -738,17 +764,20 @@ def _build_gemini_streaming_response(
             contents=contents,
             config=cast("genai_types.GenerateContentConfigDict | None", config or None),
         )
-        async for chunk in stream:
-            data = chunk.model_dump(mode="json", by_alias=True, exclude_none=True)
-            for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
-                data.pop(k, None)
-            for cand in data.get("candidates") or []:
-                if isinstance(cand, dict) and cand.get("finishReason"):
-                    saw_finish = True
-            yield (
-                "chunk",
-                "data: " + json.dumps(data, ensure_ascii=False) + "\n\n",
-            )
+        try:
+            async for chunk in stream:
+                data = chunk.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for k in ("sdkHttpResponse", "automaticFunctionCallingHistory"):
+                    data.pop(k, None)
+                for cand in data.get("candidates") or []:
+                    if isinstance(cand, dict) and cand.get("finishReason"):
+                        saw_finish = True
+                yield (
+                    "chunk",
+                    "data: " + json.dumps(data, ensure_ascii=False) + "\n\n",
+                )
+        finally:
+            await stream.aclose()
         if not saw_finish:
             # 官方流最后一块必带 finishReason；没有就是被截断（含 SDK 类型层
             # 吞掉流内 error 帧的情况）——补一帧错误，不许静默空流收场
@@ -762,8 +791,9 @@ def _build_gemini_streaming_response(
         bytes_out = 0
         first_event_at: float | None = None
         completed = False
+        events = stream_with_heartbeat(_chunk_frames())
         try:
-            async for event_type, frame in stream_with_heartbeat(_chunk_frames()):
+            async for event_type, frame in events:
                 if event_type == HEARTBEAT_EVENT:
                     # 原生 Gemini 路由没有安全的空 data 帧形状：发 SSE 注释行（规范要求忽略）
                     yield ": ping\n\n"
@@ -795,6 +825,7 @@ def _build_gemini_streaming_response(
             )
             yield format_sse_error(exc)
         finally:
+            await events.aclose()
             if completed:
                 first = f"{first_event_at:.1f}s" if first_event_at is not None else "-"
                 logger.info(

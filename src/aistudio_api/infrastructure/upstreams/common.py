@@ -10,12 +10,14 @@ wire → 官方（请求侧）、官方 → wire 语义（响应侧，产出 Mod
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING, TypeVar
 
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import Candidate, GeneratedImage, ModelOutput
-from aistudio_api.infrastructure.gateway.wire_spec import SchemaIndex
+from aistudio_api.infrastructure.gateway.wire_spec import SchemaIndex, ToolIndex
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -76,17 +78,25 @@ def part_to_official(part: AistudioPart) -> dict[str, object]:
         mime, b64 = part.inline_data
         out["inlineData"] = {"mimeType": mime, "data": b64}
     elif part.function_call:
-        fc = {"name": part.function_call[0], "args": part.function_call[1] or {}}
+        args = part.function_call[1]
+        fc = {"name": part.function_call[0], "args": args if args is not None else {}}
         if len(part.function_call) > 2 and part.function_call[2]:
             fc["id"] = part.function_call[2]
         out["functionCall"] = fc
     elif part.function_response:
         name, payload = part.function_response[0], part.function_response[1]
-        out["functionResponse"] = {"name": name, "response": payload or {}}
+        response = {"name": name, "response": payload if payload is not None else {}}
+        if len(part.function_response) > 2 and part.function_response[2]:
+            response["id"] = part.function_response[2]
+        out["functionResponse"] = response
     elif part.executable_code:
-        out["executableCode"] = {"code": part.executable_code[1]}
+        language, code = part.executable_code
+        out["executableCode"] = {"language": language, "code": code}
     elif part.code_execution_result:
-        out["codeExecutionResult"] = {"outcome": "OK", "output": part.code_execution_result[1]}
+        outcome, output = part.code_execution_result
+        out["codeExecutionResult"] = {
+            "outcome": outcome.removeprefix("OUTCOME_"), "output": output
+        }
     else:
         out["text"] = part.text or ""
     if part.thought:
@@ -147,18 +157,48 @@ def wire_schema_to_official(wire: object) -> dict[str, object]:
     required = _get(wire, SchemaIndex.REQUIRED)
     if isinstance(required, list) and required:
         schema["required"] = [str(x) for x in required]
+    for index, name in (
+        (SchemaIndex.MIN_PROPERTIES, "minProperties"),
+        (SchemaIndex.MAX_PROPERTIES, "maxProperties"),
+        (SchemaIndex.MINIMUM, "minimum"),
+        (SchemaIndex.MAXIMUM, "maximum"),
+        (SchemaIndex.MIN_LENGTH, "minLength"),
+        (SchemaIndex.MAX_LENGTH, "maxLength"),
+        (SchemaIndex.PATTERN, "pattern"),
+        (SchemaIndex.EXAMPLE, "example"),
+        (SchemaIndex.MAX_ITEMS, "maxItems"),
+        (SchemaIndex.MIN_ITEMS, "minItems"),
+        (SchemaIndex.PROPERTY_ORDERING, "propertyOrdering"),
+    ):
+        value = _get(wire, index)
+        if value is not None:
+            schema[name] = value
+    for index, name in (
+        (SchemaIndex.ONE_OF, "oneOf"),
+        (SchemaIndex.ANY_OF, "anyOf"),
+        (SchemaIndex.ALL_OF, "allOf"),
+    ):
+        value = _get(wire, index)
+        if isinstance(value, list):
+            schema[name] = [wire_schema_to_official(child) for child in value]
+    not_schema = _get(wire, SchemaIndex.NOT)
+    if isinstance(not_schema, list):
+        schema["not"] = wire_schema_to_official(not_schema)
     return schema
 
 
 def wire_tools_to_official(tools: Iterable[Iterable] | None) -> list[dict[str, object]]:
-    """wire 工具声明（[[name, desc?, params_wire], ...] 一组一 declaration）→ 官方 tools。"""
-    if not tools:
-        return []
-    declarations: list[dict[str, object]] = []
-    for tool in tools:
+    """Canonical Tool arrays → official declarations and built-in tools."""
+    out: list[dict[str, object]] = []
+    for tool in tools or []:
         if not isinstance(tool, list):
             continue
-        for decl in tool:
+        declarations: list[dict[str, object]] = []
+        raw_declarations = (
+            tool[ToolIndex.FUNCTION_DECLARATIONS]
+            if len(tool) > ToolIndex.FUNCTION_DECLARATIONS else None
+        )
+        for decl in raw_declarations if isinstance(raw_declarations, list) else []:
             if not isinstance(decl, list) or not decl or not isinstance(decl[0], str):
                 continue
             official: dict[str, object] = {"name": decl[0]}
@@ -167,7 +207,17 @@ def wire_tools_to_official(tools: Iterable[Iterable] | None) -> list[dict[str, o
             if len(decl) > 2 and isinstance(decl[2], list) and decl[2]:
                 official["parameters"] = wire_schema_to_official(decl[2])
             declarations.append(official)
-    return [{"functionDeclarations": declarations}] if declarations else []
+        if declarations:
+            out.append({"functionDeclarations": declarations})
+        for index, name in (
+            (ToolIndex.CODE_EXECUTION, "codeExecution"),
+            (ToolIndex.GOOGLE_SEARCH, "googleSearch"),
+            (ToolIndex.URL_CONTEXT, "urlContext"),
+            (ToolIndex.GOOGLE_MAPS, "googleMaps"),
+        ):
+            if len(tool) > index and isinstance(tool[index], list):
+                out.append({name: {}})
+    return out
 
 
 def wire_safety_to_official(
@@ -187,19 +237,92 @@ def wire_safety_to_official(
     return out
 
 
+def wire_generation_to_official(overrides: dict[str, object] | None) -> dict[str, object]:
+    """Normalized generation settings → SDK config, preserving explicit zero values."""
+    values = overrides or {}
+    config = {
+        key: values[key]
+        for key in (
+            "temperature", "top_p", "top_k", "stop_sequences", "presence_penalty",
+            "frequency_penalty", "response_logprobs", "logprobs", "seed",
+            "response_mime_type", "candidate_count",
+        )
+        if values.get(key) is not None
+    }
+    if values.get("max_tokens") is not None:
+        config["max_output_tokens"] = values["max_tokens"]
+    schema = values.get("response_schema")
+    if schema is not None:
+        config["response_schema"] = wire_schema_to_official(schema) if isinstance(schema, list) else schema
+    thinking = values.get("thinking_config")
+    if isinstance(thinking, list) and len(thinking) > 3:
+        from aistudio_api.application.overrides import wire_thinking_level
+
+        level = wire_thinking_level(thinking)
+        if level:
+            config["thinking_config"] = {"thinking_level": level.upper(), "include_thoughts": True}
+    elif isinstance(thinking, dict):
+        config["thinking_config"] = dict(thinking)
+    if "include_thoughts" in values:
+        thinking_config = config.setdefault("thinking_config", {})
+        if isinstance(thinking_config, dict):
+            thinking_config["include_thoughts"] = values["include_thoughts"]
+    modalities = values.get("image_output_mode")
+    if modalities is not None:
+        from aistudio_api.infrastructure.gateway.wire_types import (
+            AistudioImageOutputMode,
+        )
+
+        if isinstance(modalities, AistudioImageOutputMode):
+            modalities = modalities.to_wire()
+        if isinstance(modalities, list):
+            names = {1: "TEXT", 2: "IMAGE", 3: "AUDIO"}
+            config["response_modalities"] = [names[item] for item in modalities if item in names]
+    resolution = values.get("output_resolution")
+    if isinstance(resolution, list):
+        image_config: dict[str, object] = {}
+        if resolution and resolution[0] is not None:
+            image_config["aspect_ratio"] = resolution[0]
+        if len(resolution) > 1 and resolution[1] is not None:
+            image_config["image_size"] = resolution[1]
+        if image_config:
+            config["image_config"] = image_config
+    media = values.get("media_resolution")
+    if media is not None:
+        names = {1: "MEDIA_RESOLUTION_LOW", 2: "MEDIA_RESOLUTION_MEDIUM", 3: "MEDIA_RESOLUTION_HIGH"}
+        config["media_resolution"] = names.get(media, media) if isinstance(media, int) else media
+    return config
+
+
+def wire_tool_config_to_official(tool_config: list[object] | None) -> dict[str, object]:
+    if not tool_config or len(tool_config) < 2 or not isinstance(tool_config[1], list):
+        return {}
+    fcc = tool_config[1]
+    if not fcc:
+        return {}
+    modes = {0: "MODE_UNSPECIFIED", 1: "AUTO", 2: "ANY", 3: "NONE", 4: "VALIDATED"}
+    config: dict[str, object] = {"mode": modes.get(fcc[0], "AUTO")}
+    if len(fcc) > 1 and isinstance(fcc[1], list) and fcc[1]:
+        config["allowed_function_names"] = list(fcc[1])
+    return {"function_calling_config": config}
+
+
 def usage_to_ours(usage: dict | None) -> dict[str, object]:
     usage = usage or {}
     prompt = int(usage.get("promptTokenCount", 0) or 0)
-    completion = int(usage.get("candidatesTokenCount", 0) or 0)
-    total = int(usage.get("totalTokenCount", 0) or (prompt + completion))
+    visible = int(usage.get("candidatesTokenCount", 0) or 0)
     thought = usage.get("thoughtsTokenCount")
+    completion = visible + int(thought or 0)
     out: dict[str, object] = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
-        "total_tokens": total,
+        "total_tokens": int(usage.get("totalTokenCount", 0) or (prompt + completion)),
     }
     if thought is not None:
-        out["thoughts_token_count"] = int(thought or 0)
+        out["completion_tokens_details"] = {
+            "reasoning_tokens": int(thought or 0),
+            "visible_tokens": visible,
+        }
     cached = usage.get("cachedContentTokenCount")
     if cached is not None:
         out["cached_tokens"] = int(cached or 0)
@@ -207,72 +330,93 @@ def usage_to_ours(usage: dict | None) -> dict[str, object]:
 
 
 def official_chunk_events(data: dict) -> list[tuple[str, object]]:
-    """官方 GenerateContentResponse dict → 我们的事件词汇表（流式用）。
-
-    词汇与 client.stream_generate_content（AI Studio 通道）一致：
-    ("body", str) / ("thinking", str) / ("tool_calls", list) / ("images", list) /
-    ("thought_signature", str) / ("finish_reason", int) / ("usage", dict)。
-    """
+    """Official chunks → gateway events; additional candidates carry their index."""
     events: list[tuple[str, object]] = []
-    for candidate in data.get("candidates") or []:
+    for position, candidate in enumerate(data.get("candidates") or []):
+        index = candidate.get("index", position)
+        candidate_events: list[tuple[str, object]] = []
         for part in (candidate.get("content") or {}).get("parts") or []:
             if not isinstance(part, dict):
                 continue
+            signature = part.get("thoughtSignature")
+            if signature:
+                candidate_events.append(("thought_signature", str(signature)))
             text = part.get("text")
             if isinstance(text, str) and text:
-                events.append(("thinking" if part.get("thought") else "body", text))
+                candidate_events.append(("thinking" if part.get("thought") else "body", text))
             fc = part.get("functionCall")
             if isinstance(fc, dict) and fc.get("name"):
-                events.append(("tool_calls", [dict(fc)]))
+                call = dict(fc)
+                if signature:
+                    call["thought_signature"] = str(signature)
+                candidate_events.append(("tool_calls", [call]))
+            fr = part.get("functionResponse")
+            if isinstance(fr, dict) and fr.get("name"):
+                candidate_events.append(("function_responses", [dict(fr)]))
             inline = part.get("inlineData")
             if isinstance(inline, dict) and inline.get("data"):
-                b64 = str(inline["data"])
-                events.append(
-                    (
-                        "images",
-                        [
-                            GeneratedImage(
-                                mime=str(inline.get("mimeType") or "image/png"),
-                                data=b64.encode("utf-8"),
-                                size=len(b64),
-                                thought_signature=str(part.get("thoughtSignature") or ""),
-                            )
-                        ],
-                    )
-                )
-            if part.get("thoughtSignature"):
-                events.append(("thought_signature", str(part["thoughtSignature"])))
+                image_bytes = base64.b64decode(str(inline["data"]))
+                candidate_events.append((
+                    "reasoning_images" if part.get("thought") else "images",
+                    [GeneratedImage(
+                        mime=str(inline.get("mimeType") or "image/png"),
+                        data=image_bytes,
+                        size=len(image_bytes),
+                        thought_signature=str(signature or ""),
+                    )],
+                ))
+            for key, field in (("executableCode", "code"), ("codeExecutionResult", "output")):
+                code = part.get(key)
+                if isinstance(code, dict) and isinstance(code.get(field), str) and code[field]:
+                    candidate_events.append(("code_output", code[field]))
         wire_finish = finish_name_to_wire(candidate.get("finishReason"))
         if wire_finish is not None:
-            events.append(("finish_reason", wire_finish))
+            candidate_events.append(("finish_reason", wire_finish))
+        if index == 0:
+            events.extend(candidate_events)
+        else:
+            events.extend(("candidate_event", {"index": index, "type": kind, "payload": payload})
+                          for kind, payload in candidate_events)
     if isinstance(data.get("usageMetadata"), dict) and data["usageMetadata"]:
         events.append(("usage", usage_to_ours(data["usageMetadata"])))
     return events
 
 
 def official_to_model_output(data: dict, model: str) -> ModelOutput:
-    """官方响应 dict → ModelOutput（非流式聚合；与 AI Studio 通道同构）。"""
-    candidate = Candidate()
-    texts: list[str] = []
-    thoughts: list[str] = []
-    for event, payload in official_chunk_events(data):
-        if event == "body":
-            texts.append(str(payload))
-        elif event == "thinking":
-            thoughts.append(str(payload))
-        elif event == "tool_calls":
-            candidate.function_calls.extend(payload)  # type: ignore[arg-type]
-        elif event == "images":
-            candidate.images.extend(payload)  # type: ignore[arg-type]
-        elif event == "thought_signature":
-            candidate.thought_signature = str(payload)
-        elif event == "finish_reason" and isinstance(payload, int):
-            candidate.finish_reason = payload
-    candidate.text = "".join(texts)
-    candidate.thinking = "".join(thoughts)
+    """Official unary response → independent candidates, without merging choices."""
+    candidates: list[Candidate] = []
+    for raw_candidate in data.get("candidates") or []:
+        candidate = Candidate()
+        texts: list[str] = []
+        thoughts: list[str] = []
+        codes: list[str] = []
+        chunk = {"candidates": [{**raw_candidate, "index": 0}]}
+        for event, payload in official_chunk_events(chunk):
+            if event == "body":
+                texts.append(str(payload))
+            elif event == "thinking":
+                thoughts.append(str(payload))
+            elif event == "code_output":
+                codes.append(str(payload))
+            elif event == "tool_calls":
+                candidate.function_calls.extend(payload)  # type: ignore[arg-type]
+            elif event == "function_responses":
+                candidate.function_responses.extend(payload)  # type: ignore[arg-type]
+            elif event == "images":
+                candidate.images.extend(payload)  # type: ignore[arg-type]
+            elif event == "reasoning_images":
+                candidate.reasoning_images.extend(payload)  # type: ignore[arg-type]
+            elif event == "thought_signature":
+                candidate.thought_signature = str(payload)
+            elif event == "finish_reason" and isinstance(payload, int):
+                candidate.finish_reason = payload
+        candidate.text = "".join(texts)
+        candidate.thinking = "".join(thoughts)
+        candidate.code_output = "\n".join(codes)
+        candidates.append(candidate)
     usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
     return ModelOutput(
-        candidates=[candidate],
+        candidates=candidates,
         model=model,
         response_id=str(data.get("responseId") or ""),
         usage=usage_to_ours(usage) if usage else {},
@@ -303,22 +447,37 @@ async def stream_official_events(
 # partialArgs 增量提取——合成工具的参数逐片流式到达，bypass 也能真流式。
 
 
-def maybe_channel_bypass(
+def prepare_channel_contents(
     contents: list[AistudioContent],
     system_instruction_content: AistudioContent | None,
-) -> tuple[list[AistudioContent], AistudioContent | None, BypassPlan | None]:
-    """bypass 开启时对 contents 应用我们自己的注入机器；返回 (contents, system, plan)。
-
-    plan 为 None 表示 bypass 未开启（原样返回）。**就地改写**与浏览器通道
-    （capture.py）同一份 apply_bypass，行为按构造对齐。
-    """
+    *,
+    model: str,
+) -> tuple[list[AistudioContent], AistudioContent | None, BypassPlan | None, str]:
+    """Apply shared prefill → bypass rules to a per-request copy."""
     from aistudio_api.application.bypass import apply_bypass
+    from aistudio_api.application.prefill import apply_prefill
     from aistudio_api.application.runtime_settings import runtime_settings
+    from aistudio_api.infrastructure.gateway.model_defaults import (
+        resolve_model_defaults,
+    )
+
+    contents = [replace(content, parts=[replace(part) for part in content.parts]) for content in contents]
+    if system_instruction_content is not None:
+        system_instruction_content = replace(
+            system_instruction_content, parts=[replace(part) for part in system_instruction_content.parts]
+        )
+    prefill = apply_prefill(
+        contents,
+        enabled=bool(runtime_settings.get("prefillEnabled")),
+        cot_guard=bool(runtime_settings.get("prefillCotGuard")),
+        nudge=str(runtime_settings.get("prefillNudge") or ""),
+        requires_user_last_turn=not model.removeprefix("models/").startswith("gemini-2."),
+    )
 
     # 单一开关（2026-10-20 终局）：bypassEnabled 开 = 注入；行为按通道分化——
     # express 走 dev（partialArgs 流式），pg/cookie 走老整块
-    if not runtime_settings.get("bypassEnabled"):
-        return contents, system_instruction_content, None
+    if not runtime_settings.get("bypassEnabled") or resolve_model_defaults(model).is_image_model:
+        return contents, system_instruction_content, None, prefill
     plan = apply_bypass(
         contents,
         system_instruction=system_instruction_content,
@@ -328,7 +487,7 @@ def maybe_channel_bypass(
         mode=str(runtime_settings.get("bypassMode") or "prefer"),
         merge_outside=bool(runtime_settings.get("bypassMergeOutside")),
     )
-    return contents, plan.system_instruction, plan
+    return contents, plan.system_instruction, plan, prefill
 
 
 def bypass_tools_official(tool_name: str) -> list[dict[str, object]]:
@@ -374,6 +533,9 @@ class ChannelBypassExtractor:
     def __init__(self, plan: BypassPlan, *, streaming: bool | None = None) -> None:
         self.tool_name = plan.tool_name
         self.mode = plan.mode
+        self.plan = plan
+        self.merge_outside = plan.merge_outside
+        self._candidate_extractors: dict[int, ChannelBypassExtractor] = {}
         # None=按开关（express 通道）；cookie/pg 走老版本显式传 False，探针不误报
         self.streaming = (
             channel_streaming_flag_enabled() if streaming is None else streaming
@@ -390,7 +552,20 @@ class ChannelBypassExtractor:
     def feed_data(self, data: dict) -> list[tuple[str, object]]:
         events: list[tuple[str, object]] = []
         partial_text = ""
-        for candidate in data.get("candidates") or []:
+        primary_candidates = []
+        for position, candidate in enumerate(data.get("candidates") or []):
+            index = candidate.get("index", position)
+            if index == 0:
+                primary_candidates.append(candidate)
+                continue
+            extractor = self._candidate_extractors.get(index)
+            if extractor is None:
+                extractor = ChannelBypassExtractor(self.plan, streaming=self.streaming)
+                self._candidate_extractors[index] = extractor
+            for kind, payload in extractor.feed_data({"candidates": [{**candidate, "index": 0}]}):
+                events.append(("candidate_event", {"index": index, "type": kind, "payload": payload}))
+        primary = {**data, "candidates": primary_candidates}
+        for candidate in primary_candidates:
             for part in (candidate.get("content") or {}).get("parts") or []:
                 if not isinstance(part, dict):
                     continue
@@ -418,14 +593,18 @@ class ChannelBypassExtractor:
                             self.probe_will_continue = True
                     elif path:
                         self.probe_unknown_paths.add(path)
-                args = fc.get("args")
-                if isinstance(args, dict) and isinstance(args.get("content"), str):
-                    self.complete_args_content = str(args["content"])
-        for event, payload in official_chunk_events(data):
+                from aistudio_api.application.bypass import extract_content
+
+                content = extract_content(fc.get("args"))
+                if content is not None:
+                    self.complete_args_content = content
+        for event, payload in official_chunk_events(primary):
             if event == "tool_calls" and isinstance(payload, list):
                 others = [c for c in payload if isinstance(c, dict) and str(c.get("name") or "") != self.tool_name]
                 if others:
                     events.append(("tool_calls", others))
+                continue
+            if event == "body" and not self.merge_outside and self.saw_call:
                 continue
             events.append((event, payload))
         if partial_text:
@@ -469,28 +648,29 @@ class ChannelBypassExtractor:
             from aistudio_api.domain.errors import RequestError
 
             raise RequestError(502, BYPASS_MISS_MESSAGE)
+        for index, extractor in self._candidate_extractors.items():
+            for kind, payload in extractor.finish_events():
+                events.append(("candidate_event", {"index": index, "type": kind, "payload": payload}))
         return events
 
 
-def apply_extractor_nonstream(output, extractor: ChannelBypassExtractor) -> None:
-    """非流式：从完整响应里取合成工具 args 当正文（required 未命中照旧 502）。"""
-    candidate = output.candidates[0] if output.candidates else None
-    if candidate is None:
-        return
-    synthetic = [
-        c for c in candidate.function_calls if str(c.get("name") or "") == extractor.tool_name
-    ]
-    candidate.function_calls = [
-        c for c in candidate.function_calls if str(c.get("name") or "") != extractor.tool_name
-    ]
-    extractor.saw_call = bool(synthetic)
-    for call in synthetic:
-        args = call.get("args") or {}
-        if isinstance(args.get("content"), str):
-            extractor.complete_args_content = str(args["content"])
-    for event, payload in extractor.finish_events():
-        if event == "body" and isinstance(payload, str):
-            candidate.text = (candidate.text or "") + payload
+def apply_extractor_nonstream(output: ModelOutput, data: dict, plan: BypassPlan) -> None:
+    """Restore candidates in original part order with shared bypass extraction."""
+    from aistudio_api.application.bypass import BYPASS_MISS_MESSAGE, extract_from_parts
+    from aistudio_api.infrastructure.gateway.wire_parser import ResponsePart
+
+    for candidate, raw_candidate in zip(output.candidates, data.get("candidates") or [], strict=True):
+        parts = [ResponsePart(
+            text=str(part.get("text") or ""),
+            thought=bool(part.get("thought")),
+            function_call=part.get("functionCall"),
+        ) for part in (raw_candidate.get("content") or {}).get("parts") or []]
+        extraction = extract_from_parts(parts, plan.tool_name, merge_plain_text=plan.merge_outside)
+        candidate.function_calls = [call for call in candidate.function_calls if str(call.get("name") or "") != plan.tool_name]
+        if extraction.content is not None:
+            candidate.text = extraction.content
+        elif plan.mode == "required":
+            raise RequestError(502, BYPASS_MISS_MESSAGE)
 
 
 def attach_stream_probe(exc: E, probe: dict) -> E:

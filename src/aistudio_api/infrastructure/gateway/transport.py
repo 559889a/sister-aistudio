@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -137,17 +138,13 @@ async def _evaluate_transport(
         raise BrowserTransportError(f"{operation} failed: {exc}") from exc
 
 
-def _get_active_auth_cookies() -> dict[str, str] | None:
-    """从当前活跃账号的 auth.json 读取凭据 Cookie 作为本地高速兜底。"""
+def _get_auth_cookies(auth_file: str | None) -> dict[str, str] | None:
+    """Read fallback credentials from this page's account, never the active replacement."""
     try:
-        from aistudio_api.infrastructure.account.account_store import AccountStore
+        from pathlib import Path
 
-        store = AccountStore()
-        active = store.get_active_account()
-        if not active:
-            return None
-        auth_path = store.get_auth_path_optional(active.id, require_exists=True)
-        if auth_path and auth_path.is_file():
+        auth_path = Path(auth_file) if auth_file else None
+        if auth_path is not None and auth_path.is_file():
             data = json.loads(auth_path.read_text(encoding="utf-8"))
             cookies = data.get("cookies") or []
             return {
@@ -160,18 +157,6 @@ def _get_active_auth_cookies() -> dict[str, str] | None:
     return None
 
 
-def _get_active_account_tier() -> str:
-    """读取当前活跃账号的订阅权益等级 (Free / Pro / Ultra / Plus)。"""
-    try:
-        from aistudio_api.infrastructure.account.account_store import AccountStore
-
-        store = AccountStore()
-        active = store.get_active_account()
-        if active and getattr(active, "tier", None):
-            return str(active.tier)
-    except Exception:
-        pass
-    return "Free"
 
 
 async def _ensure_authorization_header(
@@ -200,7 +185,7 @@ async def _ensure_authorization_header(
         )
     }
     clean_headers["X-Goog-AuthUser"] = str(auth_user or "0")
-    effective_tier = tier if tier and tier != "Free" else _get_active_account_tier()
+    effective_tier = tier or "Free"
     tier_header = get_tier_header_value(effective_tier)
     if tier_header:
         clean_headers["X-AIStudio-G1-Tier"] = tier_header
@@ -209,9 +194,9 @@ async def _ensure_authorization_header(
         with suppress(Exception):
             await page.get_cookies()
             cookie_dict = getattr(page, "_cached_cookies", None)
-    # 2. 如果 CDP 出现超时波动或未取到 SAPISID，回退读取活跃账号 auth.json 凭据
+    # CDP Cookie lookup may fail; keep the fallback on the leased page's account.
     if not cookie_dict or not any("SAPISID" in k for k in cookie_dict):
-        disk_cookies = _get_active_auth_cookies()
+        disk_cookies = _get_auth_cookies(getattr(page, "account_auth_file", None))
         if disk_cookies and any("SAPISID" in k for k in disk_cookies):
             cookie_dict = disk_cookies
             page._cached_cookies = cookie_dict
@@ -341,24 +326,23 @@ class XHRStreamTransport:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         self._queues[rid] = queue
 
-        init_args = build_streaming_init_args(
-            url=url,
-            headers=clean_headers,
-            body=body,
-            rid=rid,
-        )
-        await _evaluate_transport(
-            page,
-            STREAMING_INIT_JS,
-            init_args,
-            timeout_s=30.0,
-            operation="streaming init",
-        )
-
-        status_sent = False
-        is_terminal = False
-
         try:
+            init_args = build_streaming_init_args(
+                url=url,
+                headers=clean_headers,
+                body=body,
+                rid=rid,
+            )
+            await _evaluate_transport(
+                page,
+                STREAMING_INIT_JS,
+                init_args,
+                timeout_s=30.0,
+                operation="streaming init",
+            )
+
+            status_sent = False
+            is_terminal = False
             while not is_terminal:
                 if page.is_closed() is True:
                     raise BrowserTransportError("Browser page closed during streaming")
@@ -406,5 +390,11 @@ class XHRStreamTransport:
                 )
         finally:
             self._queues.pop(rid, None)
-            with suppress(Exception):
+            original_error = sys.exception()
+            try:
                 await page.evaluate(STREAM_CLEANUP_JS, rid)
+            except asyncio.CancelledError:
+                if original_error is None:
+                    raise
+            except Exception:
+                pass

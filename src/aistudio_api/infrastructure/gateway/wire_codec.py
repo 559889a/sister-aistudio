@@ -10,13 +10,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 from .model_defaults import resolve_model_defaults
 from .wire_parser import (
     WIRE_PART_FILE_DATA_INDEX,
-    WIRE_PART_FUNCTION_CALL_ALT_INDEX,
-    WIRE_PART_FUNCTION_CALL_INDEX,
-    WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX,
-    WIRE_PART_FUNCTION_RESPONSE_INDEX,
-    WIRE_PART_INLINE_DATA_INDEX,
-    WIRE_PART_TEXT_INDEX,
-    WIRE_PART_THOUGHT_SIGNATURE_INDEX,
+    parse_response_part,
 )
 from .wire_spec import TopLevelIndex
 from .wire_types import (
@@ -419,87 +413,55 @@ class AistudioWireCodec:
         return contents
 
     def _decode_part(self, raw_part) -> AistudioPart:
+        parsed = parse_response_part(raw_part)
+        part = AistudioPart(
+            thought=parsed.thought,
+            thought_signature=parsed.thought_signature or None,
+        )
+        if not isinstance(raw_part, list):
+            return part
         if (
-            isinstance(raw_part, list)
-            and len(raw_part) > WIRE_PART_FILE_DATA_INDEX
+            len(raw_part) > WIRE_PART_FILE_DATA_INDEX
             and isinstance(raw_part[WIRE_PART_FILE_DATA_INDEX], list)
-            and len(raw_part[WIRE_PART_FILE_DATA_INDEX]) >= 1
+            and raw_part[WIRE_PART_FILE_DATA_INDEX]
             and isinstance(raw_part[WIRE_PART_FILE_DATA_INDEX][0], str)
         ):
-            return AistudioPart(file_id=raw_part[WIRE_PART_FILE_DATA_INDEX][0])
-        if (
-            isinstance(raw_part, list)
-            and len(raw_part) > WIRE_PART_INLINE_DATA_INDEX
-            and isinstance(raw_part[WIRE_PART_INLINE_DATA_INDEX], list)
-            and len(raw_part[WIRE_PART_INLINE_DATA_INDEX]) >= 2
-        ):
-            return AistudioPart(
-                inline_data=(
-                    raw_part[WIRE_PART_INLINE_DATA_INDEX][0],
-                    raw_part[WIRE_PART_INLINE_DATA_INDEX][1],
+            part.file_id = raw_part[WIRE_PART_FILE_DATA_INDEX][0]
+        elif parsed.inline_data is not None:
+            part.inline_data = parsed.inline_data
+        elif parsed.function_call is not None:
+            raw = parsed.function_call.get("raw")
+            if isinstance(raw, list):
+                name = raw[0] if raw and isinstance(raw[0], str) else "unknown"
+                args = raw[1] if len(raw) > 1 else {}
+                part.function_call = (
+                    (name, args, raw[2])
+                    if len(raw) > 2 and isinstance(raw[2], str)
+                    else (name, args)
                 )
-            )
-        if isinstance(raw_part, list):
-            raw_function_call = None
-            if len(raw_part) > WIRE_PART_FUNCTION_CALL_ALT_INDEX and isinstance(
-                raw_part[WIRE_PART_FUNCTION_CALL_ALT_INDEX], list
-            ):
-                raw_function_call = raw_part[WIRE_PART_FUNCTION_CALL_ALT_INDEX]
-            elif len(raw_part) > WIRE_PART_FUNCTION_CALL_INDEX and isinstance(
-                raw_part[WIRE_PART_FUNCTION_CALL_INDEX], list
-            ):
-                raw_function_call = raw_part[WIRE_PART_FUNCTION_CALL_INDEX]
-            if raw_function_call is not None:
-                name = (
-                    raw_function_call[0]
-                    if raw_function_call and isinstance(raw_function_call[0], str)
-                    else "unknown"
+        elif parsed.function_response is not None:
+            raw = parsed.function_response.get("raw")
+            if isinstance(raw, list):
+                name = raw[0] if raw and isinstance(raw[0], str) else "unknown"
+                response = raw[1] if len(raw) > 1 else {}
+                part.function_response = (
+                    (name, response, raw[2])
+                    if len(raw) > 2 and isinstance(raw[2], str)
+                    else (name, response)
                 )
-                args = raw_function_call[1] if len(raw_function_call) > 1 else {}
-                call_id = (
-                    raw_function_call[2]
-                    if len(raw_function_call) > 2
-                    and isinstance(raw_function_call[2], str)
-                    else None
-                )
-                signature = (
-                    raw_part[WIRE_PART_THOUGHT_SIGNATURE_INDEX]
-                    if len(raw_part) > WIRE_PART_THOUGHT_SIGNATURE_INDEX
-                    and isinstance(raw_part[WIRE_PART_THOUGHT_SIGNATURE_INDEX], str)
-                    else None
-                )
-                function_call = (name, args, call_id) if call_id else (name, args)
-                return AistudioPart(
-                    function_call=function_call, thought_signature=signature
-                )
-        if isinstance(raw_part, list) and (
-            (
-                len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX
-                and isinstance(raw_part[WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX], list)
+        elif isinstance(parsed.executable_code, list) and len(parsed.executable_code) > 1:
+            part.executable_code = (
+                str(parsed.executable_code[0]), str(parsed.executable_code[1]),
             )
-            or (
-                len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_INDEX
-                and isinstance(raw_part[WIRE_PART_FUNCTION_RESPONSE_INDEX], list)
+        elif isinstance(parsed.code_execution_result, list) and len(parsed.code_execution_result) > 1:
+            outcomes = {1: "OUTCOME_OK", 2: "OUTCOME_FAILED", 3: "OUTCOME_DEADLINE_EXCEEDED"}
+            part.code_execution_result = (
+                outcomes.get(parsed.code_execution_result[0], str(parsed.code_execution_result[0])),
+                str(parsed.code_execution_result[1]),
             )
-        ):
-            raw_function_response = (
-                raw_part[WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX]
-                if len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX
-                and isinstance(raw_part[WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX], list)
-                else raw_part[WIRE_PART_FUNCTION_RESPONSE_INDEX]
-            )
-            name = (
-                raw_function_response[0]
-                if raw_function_response and isinstance(raw_function_response[0], str)
-                else "unknown"
-            )
-            response = (
-                raw_function_response[1] if len(raw_function_response) > 1 else {}
-            )
-            return AistudioPart(function_response=(name, response))
-        if isinstance(raw_part, list) and len(raw_part) > WIRE_PART_TEXT_INDEX:
-            return AistudioPart(text=raw_part[WIRE_PART_TEXT_INDEX])
-        return AistudioPart()
+        else:
+            part.text = parsed.text
+        return part
 
     def _decode_system_instruction(self, raw_instruction) -> AistudioContent | None:
         if not raw_instruction or not isinstance(raw_instruction, list):

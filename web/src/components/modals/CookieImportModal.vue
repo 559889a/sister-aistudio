@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
+import FormInput from '@/components/ui/FormInput.vue'
+import { useToastStore } from '@/stores/toast.ts'
 import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
 defineProps<{
   modelValue: boolean
@@ -29,17 +31,28 @@ const selectedFileSize = ref('')
 const selectedFileContent = ref('')
 const localFilePath = ref('')
 const detectedCount = ref<number | null>(null)
+const fileReading = ref(false)
+let fileReader: FileReader | null = null
+
+onUnmounted(() => fileReader?.abort())
 
 function onFileChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
 
+  fileReader?.abort()
+  selectedFileContent.value = ''
+  detectedCount.value = null
+  fileReading.value = true
   selectedFileName.value = file.name
   selectedFileSize.value = `${(file.size / 1024).toFixed(1)} KB`
 
   const reader = new FileReader()
+  fileReader = reader
   reader.onload = (e) => {
+    if (fileReader !== reader) return
+    fileReading.value = false
     const text = (e.target?.result as string) || ''
     selectedFileContent.value = text
     try {
@@ -50,10 +63,18 @@ function onFileChange(event: Event) {
       detectedCount.value = null
     }
   }
+  reader.onerror = () => {
+    if (fileReader !== reader) return
+    fileReading.value = false
+    useToastStore().error('读取凭据文件失败，请重新选择文件')
+  }
   reader.readAsText(file)
 }
 
 function clearSelectedFile() {
+  fileReader?.abort()
+  fileReader = null
+  fileReading.value = false
   selectedFileName.value = ''
   selectedFileSize.value = ''
   selectedFileContent.value = ''
@@ -63,6 +84,7 @@ function clearSelectedFile() {
   }
 }
 async function handleSubmit() {
+  if (accountsStore.importing || fileReading.value) return
   if (activeTab.value === 'file') {
     const content = selectedFileContent.value.trim()
     const path = localFilePath.value.trim()
@@ -108,7 +130,7 @@ async function handleSubmit() {
     :model-value="modelValue"
     max-width="lg"
     title="导入 Google 账号凭据"
-    @update:model-value="emit('update:modelValue', $event)"
+    @update:model-value="!accountsStore.importing && emit('update:modelValue', $event)"
   >
     <div class="space-y-4">
       <!-- Tab Switcher -->
@@ -206,20 +228,20 @@ async function handleSubmit() {
               <span>直接填入本地文件绝对路径</span>
             </span>
           </label>
-          <input
-            v-model="localFilePath"
-            type="text"
-            placeholder="/sdcard/Download/aistudio_accounts.json"
-            class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-          >
+          <FormInput
+            :model-value="localFilePath"
+            label="服务器文件路径"
+            placeholder="C:\Users\Public\Downloads\aistudio_accounts.json"
+            @update:model-value="localFilePath = String($event ?? '')"
+          />
           <div class="flex items-center gap-1.5 flex-wrap pt-0.5 text-[11px] font-mono">
             <span class="text-gray-400 font-sans">快捷路径:</span>
             <button
               type="button"
               class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
-              @click="localFilePath = '/sdcard/Download/aistudio_accounts.json'"
+              @click="localFilePath = 'C:\\Users\\Public\\Downloads\\aistudio_accounts.json'"
             >
-              /sdcard/Download/aistudio_accounts.json
+              C:\Users\Public\Downloads\aistudio_accounts.json
             </button>
             <button
               type="button"
@@ -313,7 +335,7 @@ async function handleSubmit() {
         variant="primary"
         size="sm"
         :loading="accountsStore.importing"
-        :disabled="activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim()"
+        :disabled="fileReading || (activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim())"
         @click="handleSubmit"
       >
         <template #default>

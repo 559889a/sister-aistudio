@@ -52,7 +52,7 @@ WIRE_USAGE_CACHED_TOKENS = 3  # Field 4 cached prompt token count
 WIRE_USAGE_PROMPT_DETAILS = 4  # Field 5 prompt tokens breakdown structure
 WIRE_USAGE_REASONING_TOKENS = 9  # Field 10 thinking/reasoning token count
 
-# Candidate indexes inside chunk[0][0] (WIRE_SPECIFICATION.md §7.2)
+# Candidate indexes inside chunk[0][candidate_index] (WIRE_SPECIFICATION.md §7.2)
 WIRE_CANDIDATE_CONTENT = 0  # Field 1 [parts, role]
 WIRE_CANDIDATE_FINISH_REASON = 1  # Field 2 finish reason enum code
 WIRE_CANDIDATE_FINISH_MESSAGE = 3  # Field 4 finish message string
@@ -60,32 +60,44 @@ WIRE_CANDIDATE_SAFETY_RATINGS = 4  # Field 5 safety ratings array
 
 
 def _looks_like_response_chunk(value: object) -> bool:
-    return isinstance(value, list) and len(value) > 0 and isinstance(value[0], list)
+    if not isinstance(value, list) or not value:
+        return False
+    container = value[0]
+    if container is None:
+        return True
+    if not isinstance(container, list):
+        return False
+    for candidate in container:
+        if candidate is None or isinstance(candidate, str):
+            continue
+        if not isinstance(candidate, list):
+            return False
+        if not candidate:
+            continue
+        if candidate[0] is None:
+            if parse_chunk_usage(candidate) or (
+                len(candidate) > WIRE_RESPONSE_ID_INDEX
+                and isinstance(candidate[WIRE_RESPONSE_ID_INDEX], str)
+                and candidate[WIRE_RESPONSE_ID_INDEX]
+            ):
+                return False
+            continue
+        content = candidate[0]
+        if not isinstance(content, list) or not content or not isinstance(content[0], list):
+            return False
+        if len(content) > 1 and not isinstance(content[1], str):
+            return False
+        if any(not isinstance(part, list) or (part and isinstance(part[0], list)) for part in content[0]):
+            return False
+    return True
 
 
 def _iter_response_chunks(outer: object) -> list[list[object]]:
-    if isinstance(outer, list) and outer:
-        if len(outer) == 1 and isinstance(outer[0], list):
-            inner = outer[0]
-            nested_chunks = [
-                item
-                for item in inner
-                if _looks_like_response_chunk(item) and isinstance(item, list)
-            ]
-            if nested_chunks:
-                return nested_chunks
-        top_level_chunks = [
-            item
-            for item in outer
-            if _looks_like_response_chunk(item) and isinstance(item, list)
-        ]
-        if len(top_level_chunks) > 1:
-            return top_level_chunks
-
-    if _looks_like_response_chunk(outer) and isinstance(outer, list):
+    if isinstance(outer, list) and _looks_like_response_chunk(outer):
         return [outer]
-
-    return []
+    if not isinstance(outer, list):
+        return []
+    return [chunk for item in outer for chunk in _iter_response_chunks(item)]
 
 
 def _coerce_int(value: object) -> int | None:
@@ -140,7 +152,7 @@ def parse_response_part(raw_part: object) -> ResponsePart:
     # 只有「下标 0 是 parts 列表 / 也是角色名」才算内容块；`[None, "model"]` 是
     # 「正文恰好是 model 这个词」的合法 text part，按角色名一律吞掉会真的丢字
     # （流式分块边界上整块正文正好等于 model/user/system/assistant 时就会发生）。
-    if len(raw_part) == 2 and raw_part[1] in _ROLE_NAMES:
+    if len(raw_part) == 2 and isinstance(raw_part[1], str) and raw_part[1] in _ROLE_NAMES:
         first = raw_part[0]
         if isinstance(first, list) or (isinstance(first, str) and first in _ROLE_NAMES):
             return ResponsePart()
@@ -436,7 +448,8 @@ def parse_chunk_usage(chunk: object) -> dict[str, object]:
     )
 
 
-def parse_response_chunk(chunk: list[object]) -> Candidate:
+def parse_response_chunk(chunk: list[object], candidate_index: int = 0) -> Candidate:
+    """Decode one ordinal candidate; candidate zero remains the default."""
     candidate = Candidate()
     if (
         not isinstance(chunk, list)
@@ -446,10 +459,13 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
         return candidate
 
     candidates_container = chunk[WIRE_CHUNK_CANDIDATES_INDEX]
-    if not isinstance(candidates_container, list) or not candidates_container:
+    if (
+        not isinstance(candidates_container, list)
+        or not 0 <= candidate_index < len(candidates_container)
+    ):
         return candidate
 
-    raw_candidate = candidates_container[0]
+    raw_candidate = candidates_container[candidate_index]
     if not isinstance(raw_candidate, list):
         return candidate
 
@@ -497,10 +513,11 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
                 reasoning_images.extend(decoded_images)
             else:
                 images.extend(decoded_images)
-        if part.executable_code:
-            code_outputs.append(str(part.executable_code))
-        if part.code_execution_result:
-            code_outputs.append(str(part.code_execution_result))
+        for code in (part.executable_code, part.code_execution_result):
+            if isinstance(code, list) and len(code) > 1 and isinstance(code[1], str):
+                code_outputs.append(code[1])
+            elif isinstance(code, str) and code:
+                code_outputs.append(code)
         if part.function_call:
             function_calls.append(part.function_call)
         if part.function_response:
@@ -543,58 +560,51 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
 
 
 def parse_text_output(raw: str) -> ModelOutput:
+    """Merge all candidates and retain the latest nonempty response metadata."""
     output = ModelOutput(raw_response=raw)
 
     parts = extract_outer_json(raw)
     if not parts:
         return output
 
-    outer = parts[0]
-    chunks = _iter_response_chunks(outer)
+    chunks = [chunk for outer in parts for chunk in _iter_response_chunks(outer)]
     if not chunks:
         return output
 
-    merged = Candidate()
     for chunk in chunks:
-        parsed = parse_response_chunk(chunk)
-        if parsed.text:
+        usage = parse_chunk_usage(chunk)
+        if usage:
+            output.usage = usage
+        if len(chunk) > WIRE_RESPONSE_ID_INDEX:
+            raw_rid = chunk[WIRE_RESPONSE_ID_INDEX]
+            if isinstance(raw_rid, str) and raw_rid:
+                output.response_id = raw_rid
+        container = chunk[WIRE_CHUNK_CANDIDATES_INDEX]
+        if not isinstance(container, list):
+            continue
+        for index in range(len(container)):
+            if index == len(output.candidates):
+                output.candidates.append(Candidate())
+            merged = output.candidates[index]
+            parsed = parse_response_chunk(chunk, index)
             merged.text += parsed.text
-        if parsed.thinking:
             merged.thinking += parsed.thinking
-        if parsed.images:
             merged.images.extend(parsed.images)
-        if parsed.reasoning_images:
             merged.reasoning_images.extend(parsed.reasoning_images)
-        if parsed.function_calls:
             merged.function_calls.extend(parsed.function_calls)
-        if parsed.function_responses:
             merged.function_responses.extend(parsed.function_responses)
-        if parsed.thought_signature:
-            merged.thought_signature = parsed.thought_signature
-        if parsed.code_output:
-            merged.code_output = "\n".join(
-                filter(None, [merged.code_output, parsed.code_output])
-            )
-        if parsed.finish_reason is not None:
-            merged.finish_reason = parsed.finish_reason
-        if parsed.finish_message:
-            merged.finish_message = parsed.finish_message
-        if parsed.safety_ratings:
-            merged.safety_ratings = parsed.safety_ratings
-
-    last_chunk = chunks[-1]
-    output.usage = parse_usage_metadata(
-        last_chunk[WIRE_CHUNK_USAGE_INDEX]
-        if len(last_chunk) > WIRE_CHUNK_USAGE_INDEX
-        else None
-    )
-    raw_rid = (
-        last_chunk[WIRE_RESPONSE_ID_INDEX]
-        if len(last_chunk) > WIRE_RESPONSE_ID_INDEX
-        else None
-    )
-    output.response_id = str(raw_rid) if isinstance(raw_rid, str) else ""
-    output.candidates = [merged]
+            if parsed.thought_signature:
+                merged.thought_signature = parsed.thought_signature
+            if parsed.code_output:
+                merged.code_output = "\n".join(
+                    filter(None, [merged.code_output, parsed.code_output])
+                )
+            if parsed.finish_reason is not None:
+                merged.finish_reason = parsed.finish_reason
+            if parsed.finish_message:
+                merged.finish_message = parsed.finish_message
+            if parsed.safety_ratings:
+                merged.safety_ratings = parsed.safety_ratings
     return output
 
 

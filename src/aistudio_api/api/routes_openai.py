@@ -95,6 +95,7 @@ async def chat_completions(
     request_id = _new_request_id()
     set_request_id(request_id)
     mode = "stream" if payload.stream else "json"
+    response_model = payload.model
     started = time.perf_counter()
     logger.info(
         "→ POST /v1/chat/completions [openai.chat] %s model=%s mode=%s msgs=%d tools=%d",
@@ -124,7 +125,7 @@ async def chat_completions(
     if payload.stream:
         return StreamingResponse(
             _stream_openai_chunks(
-                payload, gemini_request, client, request_id, started
+                payload, gemini_request, client, request_id, started, response_model
             ),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
@@ -136,7 +137,7 @@ async def chat_completions(
         )
         body = to_openai_response(
             output,
-            model=payload.model,
+            model=response_model,
             request_id=request_id,
             include_thoughts=prepared.include_thoughts,
         )
@@ -166,6 +167,7 @@ async def _stream_openai_chunks(
     client: AIStudioClient,
     request_id: str,
     started: float,
+    response_model: str,
 ):
     """把内部流式事件翻成 OpenAI SSE 帧，末尾补 `data: [DONE]`。
 
@@ -181,13 +183,12 @@ async def _stream_openai_chunks(
     headers_at: float | None = None
     first_event_at: float | None = None
     completed = False
+    events = stream_with_heartbeat(stream_raw_events(payload.model, gemini_request, client))
     try:
-        async for event_type, data in stream_with_heartbeat(
-            stream_raw_events(payload.model, gemini_request, client)
-        ):
+        async for event_type, data in events:
             now = time.perf_counter()
             if event_type == HEARTBEAT_EVENT:
-                frame = format_sse(_heartbeat_frame(payload.model, request_id))
+                frame = format_sse(_heartbeat_frame(response_model, request_id))
                 bytes_out += len(frame)
                 yield frame
                 continue
@@ -209,7 +210,7 @@ async def _stream_openai_chunks(
             if event_type == "prepared":
                 if converter is None and isinstance(data, PreparedRequest):
                     converter = OpenAIStreamConverter(
-                        model=payload.model,
+                        model=response_model,
                         request_id=request_id,
                         include_thoughts=data.include_thoughts,
                         include_usage=include_usage,
@@ -253,6 +254,7 @@ async def _stream_openai_chunks(
         yield SSE_DONE
         return
     finally:
+        await events.aclose()
         if completed:
             usage = converter.total_usage if converter is not None else None
             first = (

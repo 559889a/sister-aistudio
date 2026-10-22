@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ async def test_session_hot_cookie_switching(tmp_path):
 
     page = MagicMock(spec=CDPPage)
     page.is_closed = MagicMock(return_value=False)
+    page.add_init_script = AsyncMock()
     mock_cdp = MagicMock(spec=CDPClient)
     mock_cdp.connect_page = AsyncMock(return_value=page)
     session._cdp_client = mock_cdp
@@ -182,8 +184,29 @@ async def test_ensure_browser_cdp_refreshes_activity_timestamp(monkeypatch):
     await session._ensure_browser_cdp()
 
     assert time.time() - session._last_activity_time < 5.0
+    fake_client.connect_page.assert_not_awaited()
 
     monkeypatch.setattr(settings, "browser_idle_timeout", 1800)
     session._close_internal = AsyncMock()  # type: ignore[method-assign]
     assert await session.check_idle_timeout() is False
     session._close_internal.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError("CDP not ready"), asyncio.CancelledError()])
+async def test_cold_browser_start_failure_releases_process(tmp_path, failure):
+    session = BrowserSession(9222, auth_file=str(tmp_path / "auth.json"))
+    process = MagicMock()
+    process.is_alive.return_value = True
+    client = MagicMock(spec=CDPClient)
+    client.wait_until_ready = AsyncMock(side_effect=failure)
+    with (
+        patch("aistudio_api.infrastructure.gateway.session.launch_chromium_process", return_value=process),
+        patch("aistudio_api.infrastructure.gateway.session.CDPClient", return_value=client),
+        pytest.raises(type(failure)),
+    ):
+        await session._ensure_browser_cdp()
+    process.terminate.assert_called_once()
+    client.close.assert_awaited_once()
+    assert session._proc is None
+    assert session._cdp_client is None

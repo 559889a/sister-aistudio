@@ -39,10 +39,11 @@ const availableAccountsCount = computed(() => {
 })
 
 async function loadData() {
-  await Promise.all([
+  const results = await Promise.all([
     accountsStore.fetchAll(),
     systemStore.fetchStats(),
   ])
+  if (results.some((ok) => !ok)) throw new Error('仪表盘数据刷新失败')
 }
 
 // 页面可见时每 10 秒自动轮询一次统计与账号状态

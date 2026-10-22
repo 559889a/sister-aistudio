@@ -139,7 +139,8 @@ async def lifespan(_app: FastAPI):
                     continue
                 logger.warning("浏览器预热失败: %s", e)
 
-    warmup_task = asyncio.create_task(_warmup())
+    if account_store.list_accounts():
+        warmup_task = asyncio.create_task(_warmup())
 
     idle_task = None
     if settings.browser_idle_timeout > 0:
@@ -212,12 +213,22 @@ async def lifespan(_app: FastAPI):
         idle_task.cancel()
     if tier_task and not tier_task.done():
         tier_task.cancel()
+    runtime_state.save_stats()
+    if runtime_state.rotator is not None:
+        runtime_state.rotator.save_state()
+    express_client = registry.get("vertex_express")
+    if express_client is not None:
+        await express_client.close()
+    from aistudio_api.application.sdk_bridge import close_sdk_clients
+
+    await close_sdk_clients()
     if client:
         try:
             await client.close()
         except Exception as e:
             logger.debug("关闭客户端失败: %s", e)
     runtime_state.client = None
+    runtime_state.upstreams = None
     runtime_state.account_service = None
     runtime_state.rotator = None
 
@@ -479,6 +490,9 @@ def main():
     args = parser.parse_args()
 
     runtime_state.browser_port = args.browser_port
+    settings.port = args.port
+    settings.host = args.host
+    settings.browser_port = args.browser_port
 
     import uvicorn
 

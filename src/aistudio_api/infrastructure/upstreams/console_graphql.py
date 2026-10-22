@@ -18,27 +18,28 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from aistudio_api.domain.errors import RequestError
+from aistudio_api.domain.errors import GRPC_CODE_TO_HTTP, RequestError
 from aistudio_api.domain.models import ModelOutput
 from aistudio_api.infrastructure.upstreams.common import (
     ChannelBypassExtractor,
     apply_channel_sentinels,
-    apply_extractor_nonstream,
     attach_stream_probe,
     bypass_tool_config_official,
     bypass_tools_official,
     contents_to_official,
     finalize_stream_probe,
-    maybe_channel_bypass,
     new_stream_probe,
     official_chunk_events,
     official_to_model_output,
+    prepare_channel_contents,
+    wire_generation_to_official,
     wire_safety_to_official,
+    wire_tool_config_to_official,
     wire_tools_to_official,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -168,6 +169,9 @@ class ConsoleGraphqlClient:
         *,
         proxy_url: str | None = None,
     ) -> None:
+        from google.genai import types
+
+        self._genai_types = types
         self._cookie = cookie.strip()
         self._project_id = project_id.strip()
         if not self._project_id:
@@ -215,12 +219,14 @@ class ConsoleGraphqlClient:
         top_p: float | None = None,
         top_k: int | None = None,
         max_tokens: int | None = None,
+        generation_config_overrides: dict[str, object] | None = None,
         **_extra: Any,
-    ) -> tuple[dict[str, object], BypassPlan | None]:
+    ) -> tuple[dict[str, object], BypassPlan | None, str]:
         plan = None
+        prefill = ""
         if contents:
-            contents, system_instruction_content, plan = maybe_channel_bypass(
-                contents, system_instruction_content
+            contents, system_instruction_content, plan, prefill = prepare_channel_contents(
+                contents, system_instruction_content, model=model
             )
             contents, system_instruction_content = apply_channel_sentinels(
                 contents, system_instruction_content
@@ -228,10 +234,14 @@ class ConsoleGraphqlClient:
         variables: dict[str, object] = {
             "contents": contents_to_official(contents),
             "model": self._model_path(model),
-            "generationConfig": {},
+            "generationConfig": self._genai_types.GenerateContentConfig.model_validate(
+                wire_generation_to_official(generation_config_overrides)
+            ).model_dump(mode="json", by_alias=True, exclude_none=True),
             # 四类由网关 normalize 层强制 OFF；JAILBREAK 仅控制台面存在，永远兜底 OFF
-            "safetySettings": wire_safety_to_official(safety_settings)
-            + [{"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"}],
+            "safetySettings": [
+                *wire_safety_to_official(safety_settings),
+                {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"},
+            ],
         }
         gen_config: dict[str, object] = variables["generationConfig"]  # type: ignore[assignment]
         if temperature is not None:
@@ -242,6 +252,8 @@ class ConsoleGraphqlClient:
             gen_config["topK"] = top_k
         if max_tokens is not None:
             gen_config["maxOutputTokens"] = max_tokens
+        if "responseSchema" in gen_config:
+            gen_config["responseSchema"] = _ui_schema(gen_config["responseSchema"])
         if system_instruction_content is not None:
             variables["systemInstruction"] = {
                 "parts": contents_to_official([system_instruction_content])[0]["parts"]
@@ -262,8 +274,16 @@ class ConsoleGraphqlClient:
             official_tools = wire_tools_to_official(tools)
             if official_tools:
                 variables["tools"] = official_tools
-        # shortcut: tool_config（wire 形状）未转换，该通道 v1 不支持 tool_choice
-        _ = tool_config
+            for tool in official_tools:
+                declarations = tool.get("functionDeclarations")
+                for declaration in declarations if isinstance(declarations, list) else []:
+                    if isinstance(declaration.get("parameters"), dict):
+                        declaration["parameters"] = _ui_schema(declaration["parameters"])
+            official_tool_config = wire_tool_config_to_official(tool_config)
+            if official_tool_config:
+                variables["toolConfig"] = self._genai_types.ToolConfig.model_validate(official_tool_config).model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                )
         return (
             {
                 "requestContext": _request_context(self._project_id),
@@ -272,6 +292,7 @@ class ConsoleGraphqlClient:
                 "variables": variables,
             },
             plan,
+            prefill,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -281,23 +302,49 @@ class ConsoleGraphqlClient:
         )
 
         return httpx.AsyncClient(
-            timeout=httpx.Timeout(600.0, connect=15.0),
+            timeout=httpx.Timeout(None, connect=15.0),
             transport=GzipUploadTransport(proxy=self._proxy_url),
         )
 
     @staticmethod
-    def _graphql_error(obj: dict) -> str:
-        if isinstance(obj.get("error"), dict):
-            err = obj["error"]
-            return str(err.get("message") or err)
-        if isinstance(obj.get("error"), str):
-            return obj["error"]
+    def _graphql_error(obj: dict) -> RequestError | None:
+        """Keep nested upstream status, rather than reporting every GraphQL failure as 502."""
+        errors = list(obj.get("errors") or [])
+        if obj.get("error") is not None:
+            errors.append(obj["error"])
         for result in obj.get("results") or []:
-            for item in result.get("errors") or []:
-                msg = item.get("message") if isinstance(item, dict) else item
-                if msg:
-                    return str(msg)
-        return ""
+            errors.extend(result.get("errors") or [])
+        for error in errors:
+            if isinstance(error, str):
+                return RequestError(502, error)
+            if not isinstance(error, dict):
+                continue
+            extensions = error.get("extensions")
+            status = extensions.get("status") if isinstance(extensions, dict) else None
+            if not isinstance(status, dict):
+                status = error
+            code = status.get("code")
+            message = str(status.get("message") or error.get("message") or "")
+            if message or code is not None:
+                http_status = GRPC_CODE_TO_HTTP.get(code, 502) if isinstance(code, int) else 502
+                return RequestError(http_status, f"batchGraphql: {message}")
+        return None
+
+    @staticmethod
+    def _response_chunks(data: object) -> list[dict]:
+        """Unwrap Studio roots; results.path item payloads are already delta chunks."""
+        if not isinstance(data, dict):
+            return []
+        response = data.get("response")
+        if isinstance(response, dict):
+            return ConsoleGraphqlClient._response_chunks(response)
+        if "candidates" in data or "usageMetadata" in data or "promptFeedback" in data:
+            return [data]
+        ui = data.get("ui")
+        if not isinstance(ui, dict):
+            return []
+        responses = ui.get("streamGenerateContentV2", ui.get("streamGenerateContentWithDebug", []))
+        return [item.get("response", item) for item in responses if isinstance(item, dict)]
 
     @staticmethod
     async def _iter_json_objects(response: httpx.Response) -> AsyncIterator[dict]:
@@ -348,55 +395,72 @@ class ConsoleGraphqlClient:
                     continue
 
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
-        body, plan = self._build_body(model, **params)
-        extractor = ChannelBypassExtractor(plan, streaming=False) if plan is not None else None
+        body, plan, prefill = self._build_body(model, **params)
         probe = new_stream_probe("console_graphql", model)
         aggregated: dict[str, Any] = {"candidates": []}
-        texts: list[str] = []
+        source = self._stream_data(body)
         try:
-            async for data in self._stream_data(body):
-                events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
-                for event, payload in events:
-                    if event == "body":
-                        texts.append(str(payload))
-                    elif event == "usage":
-                        aggregated["usageMetadata"] = payload
-            if extractor is not None:
-                for event, payload in extractor.finish_events():
-                    if event == "body" and isinstance(payload, str):
-                        texts.append(payload)
+            async for data in source:
+                from aistudio_api.infrastructure.upstreams.common import (
+                    touch_stream_probe,
+                )
+
+                touch_stream_probe(probe)
+                for key, value in data.items():
+                    if key != "candidates" and value is not None:
+                        aggregated[key] = value
+                for position, candidate in enumerate(data.get("candidates") or []):
+                    index = candidate.get("index", position)
+                    while len(aggregated["candidates"]) <= index:
+                        aggregated["candidates"].append({"content": {"parts": []}})
+                    target = aggregated["candidates"][index]
+                    target.update({key: value for key, value in candidate.items() if key != "content"})
+                    content = candidate.get("content") or {}
+                    target["content"].update({key: value for key, value in content.items() if key != "parts"})
+                    target["content"]["parts"].extend(content.get("parts") or [])
+            output = official_to_model_output(aggregated, model)
+            if not output.has_content and not output.thinking and not any(
+                candidate.finish_reason is not None for candidate in output.candidates
+            ):
+                raise RequestError(502, "console_graphql 上游未返回任何内容或结束状态")
+            if plan is not None:
+                from aistudio_api.infrastructure.upstreams.common import (
+                    apply_extractor_nonstream,
+                )
+
+                apply_extractor_nonstream(output, aggregated, plan)
+            if prefill:
+                from aistudio_api.application.prefill import rejoin
+
+                for candidate in output.candidates:
+                    candidate.text = rejoin(prefill, candidate.text)
+            return output
         except RequestError as exc:
             raise attach_stream_probe(exc, finalize_stream_probe(probe, exc)) from exc
         except Exception as exc:
-            from aistudio_api.infrastructure.upstreams.common import touch_stream_probe
-
-            touch_stream_probe(probe)
             raise attach_stream_probe(
                 RequestError(502, f"console_graphql transport: {exc}"),
                 finalize_stream_probe(probe, exc),
             ) from exc
-        if texts:
-            aggregated["candidates"] = [
-                {"content": {"parts": [{"text": "".join(texts)}]}, "finishReason": "STOP"}
-            ]
-        output = official_to_model_output(aggregated, model)
-        if extractor is not None:
-            apply_extractor_nonstream(output, extractor)
-        if not output.text and not output.candidates[0].function_calls:
-            raise RequestError(502, "console_graphql 上游未返回任何内容")
-        return output
+        finally:
+            await source.aclose()
 
     async def stream_generate_content(
         self, *, model: str, **params: Any
     ) -> AsyncIterator[tuple[str, object]]:
-        body, plan = self._build_body(model, **params)
+        body, plan, prefill = self._build_body(model, **params)
         extractor = ChannelBypassExtractor(plan, streaming=False) if plan is not None else None
         probe = new_stream_probe("console_graphql", model)
+        from aistudio_api.application.prefill import StreamDeduper
         from aistudio_api.infrastructure.upstreams.common import touch_stream_probe
+
+        source = self._stream_data(body)
+        dedupers: dict[int, StreamDeduper] = {}
+        prefilled: set[int] = set()
 
         yield ("status", 200)
         try:
-            async for data in self._stream_data(body):
+            async for data in source:
                 touch_stream_probe(
                     probe,
                     body_chars=sum(
@@ -407,11 +471,41 @@ class ConsoleGraphqlClient:
                     ),
                 )
                 events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
-                for event in events:
-                    yield event
+                for kind, payload in events:
+                    index = 0
+                    if kind == "candidate_event" and isinstance(payload, dict):
+                        index = int(payload["index"])
+                        kind, payload = str(payload["type"]), payload["payload"]
+                    if kind == "body" and prefill:
+                        if index not in prefilled:
+                            yield ("body", prefill) if index == 0 else ("candidate_event", {"index": index, "type": "body", "payload": prefill})
+                            prefilled.add(index)
+                        if index not in dedupers:
+                            dedupers[index] = StreamDeduper(prefill)
+                        payload = dedupers[index].feed(str(payload))
+                        if not payload:
+                            continue
+                    yield (kind, payload) if index == 0 else ("candidate_event", {"index": index, "type": kind, "payload": payload})
             if extractor is not None:
-                for event in extractor.finish_events():
-                    yield event
+                for kind, payload in extractor.finish_events():
+                    index = 0
+                    if kind == "candidate_event" and isinstance(payload, dict):
+                        index = int(payload["index"])
+                        kind, payload = str(payload["type"]), payload["payload"]
+                    if kind == "body" and prefill:
+                        if index not in prefilled:
+                            yield ("body", prefill) if index == 0 else ("candidate_event", {"index": index, "type": "body", "payload": prefill})
+                            prefilled.add(index)
+                        if index not in dedupers:
+                            dedupers[index] = StreamDeduper(prefill)
+                        payload = dedupers[index].feed(str(payload))
+                        if not payload:
+                            continue
+                    yield (kind, payload) if index == 0 else ("candidate_event", {"index": index, "type": kind, "payload": payload})
+            for index, deduper in dedupers.items():
+                tail = deduper.flush()
+                if tail:
+                    yield ("body", tail) if index == 0 else ("candidate_event", {"index": index, "type": "body", "payload": tail})
         except RequestError as exc:
             raise attach_stream_probe(exc, finalize_stream_probe(probe, exc)) from exc
         except Exception as exc:
@@ -419,24 +513,26 @@ class ConsoleGraphqlClient:
                 RequestError(502, f"console_graphql transport: {exc}"),
                 finalize_stream_probe(probe, exc),
             ) from exc
+        finally:
+            await source.aclose()
         yield ("done", None)
 
-    async def _stream_data(self, body: dict[str, object]) -> AsyncIterator[dict]:
+    async def _stream_data(self, body: dict[str, object]) -> AsyncGenerator[dict, None]:
         async with (
             self._client() as client,
             client.stream("POST", BATCH_GRAPHQL_URL, headers=self._headers(), json=body) as response,
         ):
-                if response.status_code != 200:
-                    raw = (await response.aread()).decode("utf-8", errors="replace")
-                    raise RequestError(
-                        response.status_code,
-                        f"batchGraphql HTTP {response.status_code}: {raw[:500]}",
-                    )
-                async for obj in self._iter_json_objects(response):
-                    err = self._graphql_error(obj)
-                    if err:
-                        raise RequestError(502, f"batchGraphql: {err[:500]}")
-                    for result in obj.get("results") or []:
-                        data = result.get("data")
-                        if isinstance(data, dict) and data:
-                            yield data
+            if response.status_code != 200:
+                raw = (await response.aread()).decode("utf-8", errors="replace")
+                error = RequestError(response.status_code, f"batchGraphql HTTP {response.status_code}: {raw[:500]}")
+                error.raw_upstream_body = raw[:8192]
+                raise error
+            async for obj in self._iter_json_objects(response):
+                error = self._graphql_error(obj)
+                if error is not None:
+                    error.raw_upstream_body = json.dumps(obj, ensure_ascii=False)[:8192]
+                    raise error
+                results = obj.get("results")
+                for result in results if isinstance(results, list) else [obj]:
+                    for data in self._response_chunks(result.get("data")):
+                        yield data

@@ -190,14 +190,17 @@ async def test_browser_session_liveness_and_auto_reconnect():
             base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
         )
     )
-    session._close_internal = AsyncMock()
-    session._ensure_browser_cdp = AsyncMock(return_value=mock_alive_page)
+    rebuilt = SessionContext(
+        page=mock_alive_page, snap_key="rebuilt", auth_user="0", auth_file=None,
+        base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+    )
+    session.transition_to_account = AsyncMock(return_value=rebuilt)
 
-    # ensure_context should detect dead page, close it, and reconnect to new page
     page = await session.ensure_context()
     assert page == mock_alive_page
-    session._close_internal.assert_called_once()
-    session._ensure_browser_cdp.assert_called_once()
+    session.transition_to_account.assert_awaited_once_with(
+        session.auth_file, force_refresh=True
+    )
 
 
 @pytest.mark.asyncio
@@ -276,7 +279,10 @@ async def test_generate_snapshot_hash_complex_tools_and_multimodal():
     snapshot = await session.generate_snapshot(contents)
     assert snapshot == "!snapshot_token_ok"
     # binding 与哈希输入必须是同一份文本：写进输入框的就是哈希的原文
-    assert passed_args == [{"binding": expected_binding, "hash": expected_hash}]
+    assert len(passed_args) == 1
+    assert passed_args[0]["binding"] == expected_binding
+    assert passed_args[0]["hash"] == expected_hash
+    assert passed_args[0]["bindingId"]
     assert session.binding_state == "synced"
 
 
@@ -597,7 +603,9 @@ async def test_clear_prompt_clears_binding(mock_cdp_page):
     """请求结束后清空输入框：只清值，不点发送、不按 Enter。"""
     from aistudio_api.infrastructure.browser.scripts import CLEAR_BINDING_JS
 
-    mock_cdp_page.evaluate.return_value = "cleared"
+    mock_cdp_page.evaluate.side_effect = [
+        {"snapshot": "proof", "box": "synced"}, "cleared"
+    ]
     session = BrowserSession(port=9222)
     session.set_ready_context(
         SessionContext(
@@ -608,11 +616,17 @@ async def test_clear_prompt_clears_binding(mock_cdp_page):
             base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
         )
     )
+    await session.generate_snapshot(
+        [AistudioContent(role="user", parts=[AistudioPart(text="binding")])]
+    )
+    binding_id = mock_cdp_page.evaluate.call_args.kwargs["args"]["bindingId"]
+    mock_cdp_page.evaluate.reset_mock()
 
     await session.clear_prompt()
 
     mock_cdp_page.evaluate.assert_awaited_once()
     assert mock_cdp_page.evaluate.call_args[0][0] == CLEAR_BINDING_JS
+    assert mock_cdp_page.evaluate.call_args.kwargs["args"] == {"bindingId": binding_id}
     mock_cdp_page.send_control_enter.assert_not_called()
 
 
@@ -795,3 +809,122 @@ async def test_generate_snapshot_digest_ignores_code_parts(mock_cdp_page):
         captured_args["hash"]
         == _sha256(expected_binding.encode("utf-8")).hexdigest()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("snapshot rejected"), asyncio.CancelledError()])
+async def test_request_scope_cleans_binding_when_capture_fails(mock_cdp_page, failure):
+    from aistudio_api.infrastructure.browser.scripts import CLEAR_BINDING_JS
+
+    session = BrowserSession(9222)
+    ctx = SessionContext(
+        page=mock_cdp_page, snap_key="snap", auth_user="0", auth_file="old/auth.json",
+        base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+    )
+    session.set_ready_context(ctx)
+    mock_cdp_page.evaluate.side_effect = [failure, "cleared"]
+    with pytest.raises(type(failure)):
+        async with session.request_scope():
+            await session.generate_snapshot([
+                AistudioContent(role="user", parts=[AistudioPart(text="binding")])
+            ])
+    assert ctx.in_flight == 0
+    assert session._in_flight == 0
+    assert mock_cdp_page.evaluate.call_args.args[0] == CLEAR_BINDING_JS
+    assert mock_cdp_page.evaluate.call_args.kwargs["args"]["bindingId"]
+
+
+@pytest.mark.asyncio
+async def test_clear_prompt_without_binding_never_clears_active_page(mock_cdp_page):
+    session = BrowserSession(9222)
+    session.set_ready_context(SessionContext(
+        page=mock_cdp_page, snap_key="snap", auth_user="0", auth_file=None,
+        base_template={},
+    ))
+    await session.clear_prompt()
+    mock_cdp_page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_disallows_page_send_even_when_binding_skipped(mock_cdp_page):
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.evaluate.side_effect = _bootstrap_fake_eval()
+    with pytest.raises(RuntimeError, match="allow_page_send"):
+        await bootstrap_botguard_and_template(
+            mock_cdp_page, prefer_binding=False, allow_page_send=False
+        )
+    mock_cdp_page.fill.assert_not_awaited()
+    mock_cdp_page.send_control_enter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prompt_box_cookie_recovery_returns_success(mock_cdp_page):
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import _wait_prompt_box
+
+    mock_cdp_page.url = "https://accounts.google.com/ServiceLogin"
+    mock_cdp_page.wait_for_selector.side_effect = [TimeoutError(), TimeoutError(), True]
+    reload_cookies = AsyncMock(return_value=True)
+    await _wait_prompt_box(mock_cdp_page, reload_cookies)
+    reload_cookies.assert_awaited_once_with(mock_cdp_page)
+
+
+@pytest.mark.asyncio
+async def test_capture_cache_checks_leased_context_after_lock_wait():
+    session = BrowserSession(9222)
+    first = SessionContext(
+        page=MagicMock(spec=CDPPage), snap_key="a", auth_user="0", auth_file="a/auth.json",
+        base_template={"url": "a", "body": '["models/old"]', "headers": {}},
+    )
+    second = SessionContext(
+        page=MagicMock(spec=CDPPage), snap_key="b", auth_user="0", auth_file="b/auth.json",
+        base_template={"url": "b", "body": '["models/old"]', "headers": {}},
+    )
+    first.page.is_closed.return_value = False
+    second.page.is_closed.return_value = False
+    session.set_ready_context(first)
+    service = RequestCaptureService(session)
+    await service._lock.acquire()
+
+    async def old_request():
+        async with session.request_scope():
+            return await service._ensure_template("flash")
+
+    old = asyncio.create_task(old_request())
+    await asyncio.sleep(0)
+    session.set_ready_context(second)
+    new = asyncio.create_task(service._ensure_template("flash"))
+    await asyncio.sleep(0)
+    service._lock.release()
+    old_template, new_template = await asyncio.gather(old, new)
+    assert old_template.url == "a"
+    assert new_template.url == "b"
+    assert service._active_ctx_id == second.context_id
+
+
+@pytest.mark.asyncio
+async def test_session_stream_close_closes_transport_in_consumer_task(mock_cdp_page):
+    session = BrowserSession(9222)
+    ctx = SessionContext(
+        page=mock_cdp_page, snap_key="snap", auth_user="0", auth_file=None,
+        base_template={"url": "https://example.test", "headers": {}, "body": "[]"},
+    )
+    session.set_ready_context(ctx)
+    consumer = asyncio.current_task()
+    closed_in = []
+
+    async def transport(*_args, **_kwargs):
+        try:
+            yield "chunk", b"one"
+            await asyncio.Event().wait()
+        finally:
+            closed_in.append(asyncio.current_task())
+
+    session._transport.send_streaming_request = transport
+    stream = session.send_streaming_request(body="[]")
+    assert await anext(stream) == ("chunk", b"one")
+    await stream.aclose()
+    assert closed_in == [consumer]
+    assert ctx.in_flight == 0

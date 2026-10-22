@@ -1,7 +1,6 @@
 """非浏览器上游通道（Vertex Express / Console batchGraphql）。
 
-选择逻辑在 api/app.py 的 lifespan：``AISTUDIO_UPSTREAM`` 决定用哪条通道构造
-runtime_state.client（aistudio / vertex_express / console_graphql）。新通道实现
-AIStudioClient 的调用面（generate_content / stream_generate_content / warmup /
-clear_templates，``_session=None`` 使浏览器重启分支成为 no-op）。
+api/app.py 的 lifespan 把三通道注册进 UpstreamRegistry；模型前缀选择客户端，
+``AISTUDIO_UPSTREAM`` 只覆盖无前缀模型的默认通道。runtime_state.client 始终
+保留浏览器客户端供账号管理使用；无浏览器通道 ``_session=None`` 不参与 PG 调度。
 """

@@ -14,8 +14,10 @@ export function useSystemHealth(intervalMs = 15000) {
     try {
       const res = await fetch('/health')
       state.value = res.ok ? 'online' : 'offline'
-    } catch {
+      if (!res.ok) throw new Error(`健康检查失败 (${res.status})`)
+    } catch (err) {
       state.value = 'offline'
+      throw err
     }
   }
 

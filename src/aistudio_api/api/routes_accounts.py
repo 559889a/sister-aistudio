@@ -42,11 +42,7 @@ class AccountResponse(BaseModel):
 
 
 def to_account_response(account: AccountMeta) -> AccountResponse:
-    cid = getattr(account, "cookie_id", None) or (
-        f"cookie_{account.created_at[:16]}"
-        if getattr(account, "created_at", None)
-        else f"cookie_{account.id}"
-    )
+    cid = account.cookie_id or f"cookie_{account.id}"
     return AccountResponse(
         id=account.id,
         name=account.name,
@@ -224,14 +220,20 @@ async def detect_account_email(
         and browser_session is not None
         and browser_session.page is not None
     ):
-        if target_auth and str(target_auth) != browser_session._auth_file:
-            await browser_session.switch_auth(str(target_auth))
-        email = await browser_session.extract_account_email()
-        if (not detected_tier or detected_tier == "Free") and hasattr(
-            browser_session, "extract_account_tier"
-        ):
-            with contextlib.suppress(Exception):
-                detected_tier = await browser_session.extract_account_tier()
+        original_auth = browser_session.auth_file
+        switched = target_auth is not None and str(target_auth) != original_auth
+        try:
+            if switched:
+                await browser_session.switch_auth(str(target_auth))
+            email = await browser_session.extract_account_email()
+            if (not detected_tier or detected_tier == "Free") and hasattr(
+                browser_session, "extract_account_tier"
+            ):
+                with contextlib.suppress(Exception):
+                    detected_tier = await browser_session.extract_account_tier()
+        finally:
+            if switched:
+                await browser_session.switch_auth(original_auth)
 
     if email:
         account_service.update_account_email(account_id, email)
@@ -298,23 +300,23 @@ async def detect_account_tier(
     return to_account_response(acc)
 
 
-async def _reassign_active_after_delete(
-    account_service: AccountService, runtime_state: RuntimeState
+async def _prepare_active_delete(
+    account_service: AccountService,
+    runtime_state: RuntimeState,
+    deleted_ids: set[str],
 ) -> None:
-    """删除活跃账号后的重排：切到剩余第一个账号（浏览器蓝绿热切）。"""
-    remaining_accounts = account_service.list_accounts()
-    new_active = remaining_accounts[0] if remaining_accounts else None
+    """先切到保留账号，切换失败时不删除现有凭据。"""
+    remaining = [a for a in account_service.list_accounts() if a.id not in deleted_ids]
+    new_active = remaining[0] if remaining else None
     client = runtime_state.client
     browser_session = client._session if client else None
     if new_active is not None:
-        account_service.set_active_account(new_active.id)
         if browser_session is not None:
-            new_auth_path = account_service.get_account_auth_path(new_active.id)
-            await browser_session.switch_auth(
-                str(new_auth_path) if new_auth_path else None
-            )
+            account = await account_service.activate_account(new_active.id, browser_session)
+            if account is None:
+                raise HTTPException(status_code=503, detail="备用账号凭据不存在，未删除当前账号")
     elif browser_session is not None:
-        await browser_session.switch_auth(None)
+        await browser_session.clear_auth()
 
 
 @router.delete("/{account_id}")
@@ -326,6 +328,8 @@ async def delete_account(
     """删除账号。"""
     active_account = account_service.get_active_account()
     is_active = active_account is not None and active_account.id == account_id
+    if is_active:
+        await _prepare_active_delete(account_service, runtime_state, {account_id})
 
     success = account_service.delete_account(account_id)
     if not success:
@@ -333,8 +337,6 @@ async def delete_account(
 
     if runtime_state.rotator:
         runtime_state.rotator.remove_account(account_id)
-    if is_active:
-        await _reassign_active_after_delete(account_service, runtime_state)
 
     log.info("已删除账号: %s", account_id)
     return {"ok": True}
@@ -349,24 +351,21 @@ async def delete_cookie_group(
     """按 Cookie 组批量删除该 Cookie 下的所有子账号。"""
     active_account = account_service.get_active_account()
     active_id = active_account.id if active_account is not None else None
-    active_deleted = False
 
     accounts = account_service.list_accounts()
+    deleted_ids = {a.id for a in accounts if to_account_response(a).cookie_id == cookie_id}
+    if active_id in deleted_ids:
+        await _prepare_active_delete(account_service, runtime_state, deleted_ids)
     deleted_count = 0
     rotator = runtime_state.rotator
     for a in accounts:
-        acc_cid = getattr(a, "cookie_id", None) or f"cookie_{a.created_at[:16]}"
-        if acc_cid == cookie_id:
-            if a.id == active_id:
-                active_deleted = True
-            if account_service.delete_account(a.id):
-                deleted_count += 1
-                if rotator:
-                    rotator.remove_account(a.id)
-                log.info("已删除组 %s 下的子账号 %s", cookie_id, a.id)
+        acc_cid = to_account_response(a).cookie_id
+        if acc_cid == cookie_id and account_service.delete_account(a.id):
+            deleted_count += 1
+            if rotator:
+                rotator.remove_account(a.id)
+            log.info("已删除组 %s 下的子账号 %s", cookie_id, a.id)
 
-    if active_deleted:
-        await _reassign_active_after_delete(account_service, runtime_state)
 
     return {"deleted": deleted_count}
 
@@ -383,6 +382,25 @@ async def update_account(
         raise HTTPException(status_code=404, detail="账号不存在")
     log.info("账号已更新: %s -> %s", account.id, req.name)
     return to_account_response(account)
+
+
+async def _refresh_imported_active(
+    accounts: list[AccountMeta],
+    account_service: AccountService,
+    runtime_state: RuntimeState,
+) -> None:
+    active = account_service.get_active_account()
+    client = runtime_state.client
+    if (
+        active is None
+        or not any(a.id == active.id for a in accounts)
+        or client is None
+    ):
+        return
+    try:
+        await account_service.activate_account(active.id, client.session)
+    except Exception as exc:
+        log.warning("凭据已保存，但刷新活跃账号 %s 失败: %s", active.id, exc)
 
 
 @router.post("/import-cookies", response_model=ImportCookiesResponse)
@@ -449,19 +467,7 @@ async def import_cookies(
     if runtime_state.rotator:
         runtime_state.rotator.add_account(account.id)
         runtime_state.rotator.clear_cooldown(account.id)
-    try:
-        browser_session = (
-            runtime_state.client._session if runtime_state.client else None
-        )
-        if browser_session:
-            auth_path = account_service.get_account_auth_path(account.id)
-            count = await browser_session.import_cookies(
-                req.cookies,
-                auth_file=str(auth_path) if auth_path else None,
-            )
-            log.info("已注入 %d 个 Cookie 并为 %s 保存 auth.json", count, account.name)
-    except Exception as e:
-        log.warning("为 %s 注入浏览器 Cookie 失败: %s", account.name, e)
+    await _refresh_imported_active([account], account_service, runtime_state)
     return ImportCookiesResponse(
         account_id=account.id,
         name=account.name,
@@ -484,7 +490,6 @@ async def probe_and_import(
         probe_google_accounts_infinite,
     )
 
-    had_active_account = account_service.get_active_account() is not None
     probed = await probe_google_accounts_infinite(req.cookies)
     if not probed:
         raise HTTPException(status_code=400, detail="未探测到有效已登录 Google 账号")
@@ -508,11 +513,7 @@ async def probe_and_import(
 
     imported_accounts = [to_account_response(account) for account in metas]
 
-    client_obj = getattr(runtime_state, "client", None)
-    if not had_active_account and metas and client_obj is not None:
-        browser_session = client_obj._session
-        if browser_session is not None:
-            await account_service.activate_account(metas[0].id, browser_session)
+    await _refresh_imported_active(metas, account_service, runtime_state)
     log.info("探活与导入完成: 成功导入 %d 个账号", len(imported_accounts))
     return ProbeAndImportResponse(
         imported_count=len(imported_accounts),
@@ -539,6 +540,7 @@ async def import_bundle(
         for a in req.accounts:
             items_to_import.append(
                 {
+                    "id": a.id,
                     "name": a.name or "Google Account",
                     "email": a.email,
                     "cookies": a.cookies,
@@ -595,7 +597,7 @@ async def import_bundle(
 
     imported_accounts: list[AccountResponse] = []
     for idx, item in enumerate(items_to_import):
-        raw_cookie_str = str(item.get("cookies") or "")
+        raw_cookie_str = item.get("cookies")
         if not raw_cookie_str:
             continue
         storage_state = parse_cookie_string(raw_cookie_str)
@@ -628,12 +630,14 @@ async def import_bundle(
                             if probed and probed != "Free":
                                 acc_tier = probed
         acc_tier = acc_tier or "Free"
+        acc_id = str(item["id"]) if item.get("id") else None
         cid = f"cookie_{secrets.token_hex(4)}"
 
         account = account_service.save_account_from_cookies(
             name=acc_name,
             email=acc_email,
             storage_state=storage_state,
+            account_id=acc_id,
             auth_user=acc_auth_user,
             cookie_id=cid,
             tier=acc_tier,
@@ -643,8 +647,15 @@ async def import_bundle(
             rotator.add_account(account.id)
             rotator.clear_cooldown(account.id)
         imported_accounts.append(to_account_response(account))
-    if not account_service.get_active_account() and imported_accounts:
-        account_service.set_active_account(imported_accounts[0].id)
+    if not imported_accounts:
+        raise HTTPException(
+            status_code=400, detail="未解析到任何包含有效 cookies 的账号条目"
+        )
+    imported_metas = [
+        account for item in imported_accounts
+        if (account := account_service.get_account(item.id)) is not None
+    ]
+    await _refresh_imported_active(imported_metas, account_service, runtime_state)
     log.info("批量文件导入完成: 成功入库 %d 个账号", len(imported_accounts))
     return ImportBundleResponse(
         imported_count=len(imported_accounts),

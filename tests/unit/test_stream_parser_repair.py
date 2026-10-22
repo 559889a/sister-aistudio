@@ -273,3 +273,41 @@ def test_repair_truncated_json_keeps_already_valid_json():
 
 def test_repair_truncated_json_empty_array_is_harmless():
     assert _repair_truncated_json("[") == []
+
+
+@pytest.mark.parametrize("chunk", [
+    make_chunk([], finish=1),
+    [None, None, [5, 2, 7]],
+    [None, None, None, None, None, None, None, "rid"],
+    make_chunk([thought_part("thought")]),
+    [make_chunk([])[0] + make_chunk([text_part("second")], finish=2)[0]],
+])
+def test_finish_preserves_metadata_and_nonprimary_candidate_chunks(chunk):
+    parser = IncrementalJSONStreamParser()
+    assert list(parser.feed("[[" + json.dumps(chunk)[:-1])) == []
+    assert list(parser.finish()) == [chunk]
+    assert list(parser.finish()) == []
+
+
+@pytest.mark.parametrize(("fragment", "expected"), [
+    ('{"good": 1, "bad": tru', {"good": 1}),
+    ("[[1, 2, tru", [[1, 2]]),
+    ('[1, 2, {"k": }', [1, 2]),
+])
+def test_repair_preserves_complete_nested_siblings(fragment, expected):
+    assert _repair_truncated_json(fragment) == expected
+
+
+def test_finish_preserves_text_and_valid_args_before_nested_partial_token():
+    chunk = make_chunk([
+        text_part("kept"),
+        [None, None, None, ["f", {"good": 1, "bad": True}]],
+    ])
+    full = "[[" + json.dumps(chunk)
+    parser = IncrementalJSONStreamParser()
+    list(parser.feed(full[:full.index("true") + 3]))
+    salvaged = list(parser.finish())
+    assert len(salvaged) == 1
+    candidate = parse_response_chunk(salvaged[0])
+    assert candidate.text == "kept"
+    assert candidate.function_calls[0]["args"] == {"good": 1}

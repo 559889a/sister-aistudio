@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { accountsApi } from '@/api/accounts.ts'
+import { ApiError } from '@/api/client.ts'
 import { useSystemStore } from './system.ts'
 import type {
   Account,
@@ -29,16 +30,26 @@ export const useAccountsStore = defineStore('accounts', () => {
     return accounts.value.map((a) => {
       const rot = rotationAccounts.value[a.id] || {}
       return {
-        ...a,
         ...rot,
+        ...a,
+        last_used: rot.last_used ?? a.last_used,
       }
     })
   })
 
-  async function fetchAll() {
+  let fetchTask: Promise<boolean> | null = null
+
+  async function fetchAll(fresh = false): Promise<boolean> {
+    if (fresh && fetchTask) await fetchTask
+    if (!fetchTask) {
+      fetchTask = fetchAccounts().finally(() => { fetchTask = null })
+    }
+    return fetchTask
+  }
+  async function fetchAccounts(): Promise<boolean> {
     loading.value = true
     try {
-      const [accsRes, activeRes] = await Promise.allSettled([
+      const [accsRes, activeRes, rotationRes] = await Promise.allSettled([
         accountsApi.list(),
         accountsApi.getActive(),
         systemStore.fetchRotation(),
@@ -54,11 +65,14 @@ export const useAccountsStore = defineStore('accounts', () => {
 
       if (activeRes.status === 'fulfilled') {
         activeAccount.value = activeRes.value
-      } else if (accounts.value.length > 0 && !activeAccount.value) {
-        activeAccount.value = accounts.value[0]
+      } else if (activeRes.reason instanceof ApiError && activeRes.reason.status === 404) {
+        activeAccount.value = null
       } else if (accounts.value.length === 0) {
         activeAccount.value = null
       }
+      return accsRes.status === 'fulfilled'
+        && (activeRes.status === 'fulfilled' || (activeRes.reason instanceof ApiError && activeRes.reason.status === 404))
+        && rotationRes.status === 'fulfilled' && rotationRes.value
     } finally {
       loading.value = false
     }
@@ -71,11 +85,11 @@ export const useAccountsStore = defineStore('accounts', () => {
       const updated = await accountsApi.activate(id)
       activeAccount.value = updated
       toast.success(`已成功激活账号: ${updated.name || updated.email || updated.id}`)
-      await fetchAll()
+      await fetchAll(true)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '激活失败'
       toast.error(msg)
-      await fetchAll()
+      await fetchAll(true)
     } finally {
       activatingId.value = null
     }
@@ -86,7 +100,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       await accountsApi.delete(id)
       toast.success('账号已删除')
-      await fetchAll()
+      await fetchAll(true)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '删除失败'
       toast.error(msg)
@@ -98,7 +112,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       const res = await accountsApi.deleteCookieGroup(cookieId)
       toast.success(`已成功删除该 Cookie 凭据下的全部 ${res.deleted} 个子账号`)
-      await fetchAll()
+      await fetchAll(true)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '删除失败'
       toast.error(msg)
@@ -110,10 +124,12 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       await accountsApi.update(id, name)
       toast.success('账号名称已更新')
-      await fetchAll()
+      await fetchAll(true)
+      return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '更新失败'
       toast.error(msg)
+      return false
     }
   }
 
@@ -123,7 +139,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       const res = await accountsApi.importCookies(payload)
       toast.success(`导入成功: 解析出 ${res.cookie_count} 个 Cookie (u/${res.auth_user})`)
-      await fetchAll()
+      await fetchAll(true)
       return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '导入失败'
@@ -140,7 +156,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       const res = await accountsApi.probeAndImport(payload)
       toast.success(`已完成探测并导入 ${res.imported_count} 个账号`)
-      await fetchAll()
+      await fetchAll(true)
       return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '自动探活导入失败'
@@ -157,7 +173,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       const res = await accountsApi.importBundle(payload)
       toast.success(`批量导入成功: 已入库 ${res.imported_count} 个账号`)
-      await fetchAll()
+      await fetchAll(true)
       return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '批量导入失败'
@@ -178,7 +194,7 @@ export const useAccountsStore = defineStore('accounts', () => {
       } else {
         toast.info(`未在当前页面识别到有效邮箱${tierSuffix}`)
       }
-      await fetchAll()
+      await fetchAll(true)
       return res
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '识别邮箱失败'
@@ -192,7 +208,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     try {
       const res = await accountsApi.detectTier(id)
       toast.success(`已更新账号订阅等级: ${res.tier || 'Free'}`)
-      await fetchAll()
+      await fetchAll(true)
       return res
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '探测订阅等级失败'

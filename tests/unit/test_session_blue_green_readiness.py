@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -96,6 +96,7 @@ async def test_session_blue_green_transition_preserves_inflight():
     new_page.target_id = "page_tab_2"
     new_page.url = "https://aistudio.google.com/u/1/prompts/new_chat"
 
+    new_page.add_init_script = AsyncMock()
     mock_cdp = MagicMock(spec=CDPClient)
     mock_cdp.create_new_page = AsyncMock(return_value=new_page)
     mock_cdp.close_target = AsyncMock()
@@ -114,7 +115,6 @@ async def test_session_blue_green_transition_preserves_inflight():
     session._in_flight = 1
 
     # Mock bootstrap functions
-    from unittest.mock import patch
     with (
         patch("aistudio_api.infrastructure.gateway.session.load_cookies_to_page", AsyncMock(return_value=True)),
         patch("aistudio_api.infrastructure.gateway.session.navigate_to_aistudio", AsyncMock()),
@@ -142,3 +142,135 @@ async def test_session_blue_green_transition_preserves_inflight():
     old_page.close.assert_called_once()
     mock_cdp.close_target.assert_called_once_with("page_tab_1")
     assert old_ctx not in session._retiring_contexts
+
+
+def _ready_context(label: str) -> SessionContext:
+    page = MagicMock(spec=CDPPage)
+    page.target_id = label
+    page.is_closed.return_value = False
+    page.add_init_script = AsyncMock()
+    return SessionContext(
+        page=page, snap_key=label, auth_user="0", auth_file=f"{label}/auth.json",
+        base_template={"url": label, "headers": {}, "body": '["models/old"]'},
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_lease_survives_switch_and_nested_scope():
+    session = BrowserSession(9222)
+    old = _ready_context("old")
+    new = _ready_context("new")
+    session.set_ready_context(old)
+    async with session.request_scope() as leased:
+        assert leased is old
+        async with session.request_scope():
+            assert old.in_flight == 1
+        old.drain_event.set()
+        old.incr_in_flight()
+        assert not old.drain_event.is_set()
+        old.decr_in_flight()
+        session.set_ready_context(new)
+        assert await session.ensure_ready() is old
+        assert (await session.capture_template("flash"))["url"] == "old"
+        assert session.request_context is old
+    assert old.in_flight == 0
+    assert session.last_request_context is old
+    assert session.last_request_auth_file == "old/auth.json"
+    assert session.request_context is new
+
+
+@pytest.mark.asyncio
+async def test_inherited_request_scope_takes_its_own_lease():
+    session = BrowserSession(9222)
+    old = _ready_context("old")
+    session.set_ready_context(old)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def child():
+        async with session.request_scope():
+            started.set()
+            await release.wait()
+
+    async with session.request_scope():
+        task = asyncio.create_task(child())
+        await started.wait()
+        assert old.in_flight == 2
+        release.set()
+        await task
+        assert old.in_flight == 1
+    assert old.in_flight == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("bootstrap failed"), asyncio.CancelledError()])
+async def test_failed_blue_green_transition_restores_old_ready_context(failure):
+    session = BrowserSession(9222, auth_file="old/auth.json")
+    old = _ready_context("old")
+    new = _ready_context("new")
+    session.set_ready_context(old)
+    session._proc = MagicMock()
+    session._proc.is_alive.return_value = True
+    client = MagicMock(spec=CDPClient)
+    client.create_new_page = AsyncMock(return_value=new.page)
+    session._cdp_client = client
+    with (
+        patch("aistudio_api.infrastructure.gateway.session.load_cookies_to_page", AsyncMock(return_value=True)),
+        patch("aistudio_api.infrastructure.gateway.session.navigate_to_aistudio", AsyncMock()),
+        patch("aistudio_api.infrastructure.gateway.session.bootstrap_botguard_and_template", AsyncMock(side_effect=failure)),
+        pytest.raises(type(failure)),
+    ):
+        await session.switch_auth("new/auth.json")
+    assert session.active_context is old
+    assert session.is_ready
+    assert session.auth_file == "old/auth.json"
+    new.page.close.assert_awaited_once()
+    old.page.close.assert_not_awaited()
+    session._proc.terminate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retiring_context_has_no_generation_deadline():
+    session = BrowserSession(9222)
+    old = _ready_context("old")
+    old.incr_in_flight()
+    session._retiring_contexts.append(old)
+    drain = asyncio.create_task(session._drain_retiring_context(old))
+    with patch("aistudio_api.infrastructure.gateway.session.asyncio.wait_for", side_effect=AssertionError("generation deadline")):
+        await asyncio.sleep(0)
+        assert not drain.done()
+        old.page.close.assert_not_awaited()
+        old.decr_in_flight()
+        await drain
+    old.page.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cold_start_failure_does_not_reuse_previous_request_account():
+    session = BrowserSession(9222, auth_file="new/auth.json")
+    session._last_request_context.set(_ready_context("old"))
+    session.ensure_ready = AsyncMock(side_effect=RuntimeError("CDP unavailable"))
+    with pytest.raises(RuntimeError, match="CDP unavailable"):
+        async with session.request_scope():
+            raise AssertionError("request must not start")
+    assert session.last_request_context is None
+    assert session.last_request_auth_file == "new/auth.json"
+    assert session._in_flight == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_auth_releases_deleted_account_without_bootstrap():
+    session = BrowserSession(9222, auth_file="deleted/auth.json")
+    session._auth_user = "3"
+    session._tier = "Pro"
+    session._bootstrap_mode = "binding"
+    session._close_internal = AsyncMock()
+    session.transition_to_account = AsyncMock()
+    await session.clear_auth()
+    session._close_internal.assert_awaited_once()
+    session.transition_to_account.assert_not_awaited()
+    assert session.auth_file is None
+    assert session.profile_dir is None
+    assert session._auth_user is None
+    assert session._tier is None
+    assert session.bootstrap_mode is None

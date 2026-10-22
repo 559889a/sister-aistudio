@@ -162,6 +162,7 @@ def test_domain_overrides_scopes_osid_strictly_to_aistudio():
 @pytest.mark.asyncio
 async def test_import_bundle_flow(tmp_path):
     from aistudio_api.api.routes_accounts import ImportBundleRequest, import_bundle
+    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
@@ -175,19 +176,23 @@ async def test_import_bundle_flow(tmp_path):
           "name": "Work Profile",
           "email": "work@example.com",
           "cookies": "SID=work_sid; SAPISID=work_sapisid",
+          "tier": "Free",
           "auth_user": "0"
         },
         {
           "name": "Personal Profile",
           "email": "personal@example.com",
           "cookies": "SID=pers_sid; SAPISID=pers_sapisid",
+          "tier": "Free",
           "auth_user": "1"
         }
       ]
     }"""
 
     req = ImportBundleRequest(content=bundle_content)
-    res = await import_bundle(req, account_service=svc)
+    res = await import_bundle(
+        req, account_service=svc, runtime_state=RuntimeState(account_service=svc)
+    )
 
     assert res.imported_count == 2
     assert len(res.accounts) == 2
@@ -356,6 +361,7 @@ async def test_delete_cookie_group_migrates_active_account(tmp_path):
 
     mock_session = MagicMock()
     mock_session.switch_auth = AsyncMock()
+    mock_session.ensure_botguard_service = AsyncMock()
     mock_client = MagicMock()
     mock_client._session = mock_session
 
@@ -403,7 +409,7 @@ async def test_probe_import_activates_first_account_and_registers_in_rotator(
         cookie_id="cookie_new",
     )
     account_service = MagicMock()
-    account_service.get_active_account.return_value = None
+    account_service.get_active_account.return_value = imported
     account_service.batch_import_accounts.return_value = [imported]
     account_service.activate_account = AsyncMock(return_value=imported)
 
@@ -411,6 +417,7 @@ async def test_probe_import_activates_first_account_and_registers_in_rotator(
     rotator = MagicMock()
     runtime_state = MagicMock()
     runtime_state.client._session = browser_session
+    runtime_state.client.session = browser_session
     runtime_state.rotator = rotator
 
     monkeypatch.setattr(

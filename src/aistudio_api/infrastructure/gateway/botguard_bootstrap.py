@@ -238,9 +238,10 @@ async def read_rpc_headers(page: CDPPage) -> dict[str, str]:
 
 def build_binding_template(headers: dict[str, str]) -> dict[str, object]:
     """用默认模板 + 页面采集到的公共头拼出请求模板（不依赖页面发过生成请求）。"""
+    template_headers = DEFAULT_BOOTSTRAP_TEMPLATE.get("headers")
     merged = {
         str(key).lower(): str(value)
-        for key, value in dict(DEFAULT_BOOTSTRAP_TEMPLATE.get("headers") or {}).items()
+        for key, value in (template_headers.items() if isinstance(template_headers, dict) else [])
     }
     # 页面采集到的头优先：里面是当前会话的 x-goog-api-key / x-aistudio-* / x-goog-ext-*
     merged.update(headers)
@@ -314,11 +315,10 @@ async def try_binding_bootstrap(
             # install_hooks.js 里的 bootstrap 拦截开关。否则我们后面用页面 XHR
             # 重放 GenerateContent 时会被自己的钩子拦掉（表现是
             # `replay failed: timeout`，XHR 被 abort、status=0）。
-            with suppress(Exception):
-                await page.evaluate(
-                    "() => { if (window.__AISTUDIO__) "
-                    "window.__AISTUDIO__.interceptBootstrap = false; return true; }"
-                )
+            await page.evaluate(
+                "() => { if (window.__AISTUDIO__) "
+                "window.__AISTUDIO__.interceptBootstrap = false; return true; }"
+            )
             log.info(
                 "binding 引导就绪: 探针=%s, 输入框=%s, 页面头=%d 个, 页面可见=%s, 服务来源=%s",
                 detail,
@@ -374,10 +374,10 @@ async def _wait_prompt_box(
             log.warning("等待输入框期间检测到登录页重定向: %s，尝试重新注入 Cookie...", dbg_url)
             if reload_cookies_cb and await reload_cookies_cb(page):
                 await page.wait_for_selector("textarea", timeout_s=15.0)
-            else:
-                raise SessionExpiredError(
-                    f"Cookie 认证失效，已被重定向到 Google 登录页: {dbg_url}"
-                ) from err
+                return
+            raise SessionExpiredError(
+                f"Cookie 认证失效，已被重定向到 Google 登录页: {dbg_url}"
+            ) from err
         if "available-regions" in dbg_url:
             raise RuntimeError(
                 "Google AI Studio 地区限制: 访问被重定向至 available-regions"
@@ -549,12 +549,12 @@ async def bootstrap_botguard_and_template(
                 time.time() - t0,
             )
             return snap_key, template
-        if not allow_page_send:
-            raise RuntimeError(
-                "BotGuard binding 引导失败，且调用方禁止替页面发消息（allow_page_send=False）"
-            )
         log.info("binding 引导未通过，回退到「页面发一条探针消息」的引导方式")
 
+    if not allow_page_send:
+        raise RuntimeError(
+            "BotGuard binding 引导未通过，且调用方禁止替页面发消息（allow_page_send=False）"
+        )
     captured = await _bootstrap_with_page_send(
         page,
         is_proc_alive_cb=is_proc_alive_cb,

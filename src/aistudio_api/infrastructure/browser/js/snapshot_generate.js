@@ -1,4 +1,4 @@
-async ({ binding, hash }) => {
+async ({ binding, hash, bindingId }) => {
     // WAA proof 与页面输入框状态强绑定：先写 binding → 确认页面认了 → 再签。
     // 机制来源：Catiecli Playground Executor 2.4.9 / gemini2api 执行器 v2.0.0。
     // 上一版（只把 hash 传给快照函数、完全不碰输入框）在 AI Studio 现行构建上会拿到
@@ -10,6 +10,11 @@ async ({ binding, hash }) => {
     if (!dms || !service || !snapKey || typeof dms[snapKey] !== 'function') {
         throw new Error('service_unavailable');
     }
+    const jobs = aistudio.bindingJobs || (aistudio.bindingJobs = {});
+    const bindingJob = jobs[bindingId] = { cancelled: false };
+    const checkCancelled = () => {
+        if (bindingJob.cancelled) throw new Error('binding_cancelled');
+    };
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const isShown = (el) => {
@@ -28,10 +33,12 @@ async ({ binding, hash }) => {
     };
     // 写值必须走原生 setter：直接赋值 .value 时 Angular 受控组件收不到变更
     const fillPrompt = (text) => {
+        checkCancelled();
         const box = promptBox();
         if (!box) return null;
         const desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
         desc.set.call(box, text);
+        aistudio.binding = { id: bindingId, box, text };
         box.dispatchEvent(new window.InputEvent('input', {
             bubbles: true,
             inputType: 'insertText',
@@ -53,7 +60,7 @@ async ({ binding, hash }) => {
         } catch (e) {}
     };
     const syncPrompt = async (text) => {
-        if (!text) return 'skipped';
+        checkCancelled();
         if (!promptBox()) return 'no_box';
         // 8 秒预算：页面偶尔会把输入框值改回去（框架锁值），每两次重试加一次焦点扰动
         for (let i = 0; i < 54; i++) {
@@ -70,22 +77,28 @@ async ({ binding, hash }) => {
     // snapshot 可能因页面 zone 冻结而永不回调——用硬超时兜底（20s → 30s → 30s）
     const PROOF_TIMEOUTS = [20000, 30000, 30000];
     const runSnapshot = async (timeoutMs) => {
-        const timer = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('proof_timeout')), timeoutMs)
-        );
-        return await Promise.race([
-            Promise.resolve(dms[snapKey](service, hash)),
-            timer,
-        ]);
+        let timer;
+        try {
+            return await Promise.race([
+                Promise.resolve(dms[snapKey](service, hash)),
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error('proof_timeout')), timeoutMs);
+                }),
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
     };
 
     const job = async () => {
+        checkCancelled();
         const box = promptBox();
         const boxState = box ? await syncPrompt(binding) : 'no_box';
         let lastErr = null;
         for (let round = 0; round < PROOF_TIMEOUTS.length; round++) {
             try {
                 const proof = await runSnapshot(PROOF_TIMEOUTS[round]);
+                checkCancelled();
                 if (proof && typeof proof === 'string') {
                     aistudio.snapshot = proof;
                     return { snapshot: proof, box: boxState };
@@ -94,6 +107,8 @@ async ({ binding, hash }) => {
             } catch (err) {
                 lastErr = err;
             }
+            checkCancelled();
+            if (round + 1 === PROOF_TIMEOUTS.length) break;
             // 每轮失败先扰动焦点、再补一次 binding，然后重签
             nudgeFocus(box);
             await syncPrompt(binding);
@@ -106,5 +121,9 @@ async ({ binding, hash }) => {
     const prev = aistudio.snapQueue || Promise.resolve();
     const current = prev.catch(() => {}).then(job);
     aistudio.snapQueue = current;
-    return await current;
+    try {
+        return await current;
+    } finally {
+        delete jobs[bindingId];
+    }
 }

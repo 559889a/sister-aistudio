@@ -88,6 +88,7 @@ async def test_genai_sdk_aio_streaming(mock_client: MagicMock) -> None:
                 "total_tokens": 20,
             },
         )
+        yield ("finish_reason", 1)
 
     mock_client.stream_generate_content = fake_stream
     app.dependency_overrides[get_client] = lambda: mock_client

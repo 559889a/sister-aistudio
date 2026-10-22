@@ -84,6 +84,7 @@ async def test_ensure_active_account_early_switch():
         email="acc1@gmail.com",
         created_at="2026-01-01",
     )
+    mock_service.list_accounts.return_value = [active_acc]
     mock_service.get_active_account = MagicMock(return_value=active_acc)
 
     # acc_1 is NOT available for this model
@@ -97,10 +98,10 @@ async def test_ensure_active_account_early_switch():
         runtime_state.account_service = mock_service
 
         # 当前账号对该模型不可用 → 请求前置调度提前切号（这不是失败重试）
-        await ensure_active_account(model="gemini-2.5-flash")
-        mock_rotator.is_account_available.assert_called_with(
-            "acc_1", model="gemini-2.5-flash"
-        )
+        from aistudio_api.domain.errors import UsageLimitExceeded
+
+        with pytest.raises(UsageLimitExceeded):
+            await ensure_active_account(model="gemini-2.5-flash")
     finally:
         runtime_state.rotator = orig_rotator
         runtime_state.account_service = orig_service
@@ -141,8 +142,8 @@ def test_record_rotator_event():
         runtime_state.account_service = orig_service
 
 
-def test_account_stats_session_expired_permanent_isolation():
-    """账号标记为 session_expired 后处于永久禁用状态，美西跨天不自动重置，ignore_auth_cooldown 也不可用。"""
+def test_account_stats_session_expired_isolation_expires_after_24_hours(monkeypatch):
+    """登录态失效隔离24小时，跨午夜不提前恢复，到期允许后续请求重建会话。"""
     stats = AccountStats(account_id="acc_test")
     assert stats.is_available("gemini-3.8-flash")
 
@@ -152,15 +153,14 @@ def test_account_stats_session_expired_permanent_isolation():
     # 即使 ignore_auth_cooldown 也绝对不可用
     assert not stats.is_available("gemini-3.8-flash", ignore_auth_cooldown=True)
 
-    # 模拟跨天
     stats._check_date_reset("gemini-3.8-flash", "2099-01-01")
     assert not stats.is_available("gemini-3.8-flash")
-    assert stats.session_expired is True
-
-    # 仅手动清除冷却/重新导入时恢复
-    stats.clear_cooldown()
-    assert stats.session_expired is False
+    monkeypatch.setattr(
+        "aistudio_api.application.account_rotator.time.time",
+        lambda: stats.auth_cooldown + 1,
+    )
     assert stats.is_available("gemini-3.8-flash")
+    assert stats.session_expired is False
 
 
 def test_account_stats_cooldown_only_after_fifth_rate_limit():

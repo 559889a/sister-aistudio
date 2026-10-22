@@ -68,7 +68,9 @@ def test_wire_schema_round_trip():
 
 
 def test_wire_tools_and_safety_conversion():
-    tools = [[["get_weather", "查天气", [6, None, None, None, None, None, [["city", [1]]], ["city"]]]]]
+    tools = [
+        [None, [["get_weather", "查天气", [6, None, None, None, None, None, [["city", [1]]], ["city"]]]]]
+    ]
     official = wire_tools_to_official(tools)
     decl = official[0]["functionDeclarations"][0]
     assert decl["name"] == "get_weather"
@@ -83,6 +85,75 @@ def test_finish_name_to_wire():
     assert finish_name_to_wire("MAX_TOKENS") == 2
     assert finish_name_to_wire("FINISH_REASON_UNSPECIFIED") is None
     assert finish_name_to_wire(None) is None
+
+
+def test_official_usage_includes_reasoning_without_double_counting():
+    from aistudio_api.api.responses import to_gemini_usage_metadata
+    from aistudio_api.application.openai_bridge import convert_usage
+    from aistudio_api.infrastructure.upstreams.common import usage_to_ours
+
+    usage = usage_to_ours({"promptTokenCount": 10, "candidatesTokenCount": 2, "thoughtsTokenCount": 3, "totalTokenCount": 15})
+    assert convert_usage(usage) == {
+        "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+        "completion_tokens_details": {"reasoning_tokens": 3},
+    }
+    assert to_gemini_usage_metadata(usage).candidatesTokenCount == 2
+    assert to_gemini_usage_metadata(usage).thoughtsTokenCount == 3
+
+
+def test_official_images_roundtrip_original_bytes():
+    import base64
+
+    from aistudio_api.api.responses import to_gemini_parts
+
+    data = {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": "aGk="}}]}}]}
+    output = official_to_model_output(data, "image-model")
+    image = output.images[0]
+    assert image.data == b"hi" and image.size == 2
+    parts = to_gemini_parts("", images=output.images)
+    assert parts[0].inlineData is not None
+    assert base64.b64decode(parts[0].inlineData.data) == b"hi"
+
+
+@pytest.mark.parametrize("code,status", [(7, 403), (8, 429), (14, 503), (16, 401)])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_graphql_errors_preserve_real_upstream_status(code, status, nested):
+    error = {"message": "upstream rejected", "extensions": {"status": {"code": code, "message": "specific rejection"}}}
+    payload = {"results": [{"errors": [error]}]} if nested else {"errors": [error]}
+    client = _make_graphql_client(lambda _: httpx.Response(200, json=payload))
+    with pytest.raises(RequestError) as raised:
+        await client.generate_content(model="m", contents=_contents())
+    assert raised.value.status == status
+    assert "specific rejection" in str(raised.value)
+    assert "extensions" in raised.value.raw_upstream_body
+
+
+async def test_graphql_wrappers_do_not_drop_function_calls_and_usage():
+    function = {"candidates": [{"content": {"parts": [{"functionCall": {"name": "lookup", "args": {"city": "北京"}}}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2, "totalTokenCount": 7}}
+    envelope = {"results": [{"data": {"ui": {"streamGenerateContentV2": [function]}}}]}
+    client = _make_graphql_client(lambda _: httpx.Response(200, json=envelope))
+    output = await client.generate_content(model="m", contents=_contents())
+    assert output.function_calls == [{"name": "lookup", "args": {"city": "北京"}}]
+    assert output.usage["total_tokens"] == 7
+    assert output.candidates[0].finish_reason == 1
+
+
+@pytest.mark.parametrize("channel", ["express", "cookie"])
+async def test_channel_prefill_is_not_duplicated_by_complete_bypass_args(channel, monkeypatch):
+    from aistudio_api.application import bypass, runtime_settings
+
+    values = {**runtime_settings.DEFAULTS, "bypassEnabled": True, "prefillEnabled": True}
+    monkeypatch.setattr(runtime_settings.runtime_settings, "_values", values)
+    monkeypatch.setattr(bypass, "random_tool_name", lambda _: "emit_prefill")
+    data = {"candidates": [{"content": {"parts": [{"functionCall": {"name": "emit_prefill", "args": {"content": "PREFIXanswer"}}}]}, "finishReason": "STOP"}]}
+    if channel == "express":
+        client = _make_express_client(_FakeSDKClient(_FakeSDKModels(chunks=[_FakeResponse(data)])))
+    else:
+        client = _make_graphql_client(lambda _: httpx.Response(200, json={"results": [{"data": data}]}))
+    contents = [AistudioContent(role="user", parts=[AistudioPart(text="hi")]), AistudioContent(role="model", parts=[AistudioPart(text="PREFIX")])]
+    events = [event async for event in client.stream_generate_content(model="gemini-3.8-flash", contents=contents)]
+    assert "".join(str(payload) for kind, payload in events if kind == "body") == "PREFIXanswer"
+    assert contents[-1].role == "model" and contents[-1].parts[0].text == "PREFIX"
 
 
 def test_official_to_model_output():
@@ -254,6 +325,9 @@ def _make_graphql_client(handler) -> Any:
     client._cookie = "SAPISID=abc; __Secure-1PAPISID=abc; __Secure-3PAPISID=abc; SID=x"
     client._project_id = "proj-9"
     client._proxy_url = None
+    from google.genai import types
+
+    client._genai_types = types
     client._session = None
     client._client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return client
@@ -337,11 +411,11 @@ async def test_channel_bypass_streaming_flag_independent_of_old_switch(monkeypat
 
     from aistudio_api.infrastructure.upstreams.common import (
         ChannelBypassExtractor,
-        maybe_channel_bypass,
+        prepare_channel_contents,
     )
 
     contents = [AistudioContent(role="user", parts=[AistudioPart(text="写个故事")])]
-    _contents2, _system, plan = maybe_channel_bypass(contents, None)
+    _contents2, _system, plan, _prefill = prepare_channel_contents(contents, None, model="gemini-3.8-flash")
     assert plan is not None  # 唯一开关触发注入
 
     extractor = ChannelBypassExtractor(plan)

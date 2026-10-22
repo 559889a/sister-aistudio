@@ -834,11 +834,14 @@ class OpenAIStreamConverter:
         request_id: str,
         include_thoughts: bool = True,
         include_usage: bool = False,
+        candidate_index: int = 0,
     ) -> None:
         self.model = model
         self.request_id = request_id
         self.include_thoughts = include_thoughts
         self.include_usage = include_usage
+        self.candidate_index = candidate_index
+        self._candidate_converters: dict[int, OpenAIStreamConverter] = {}
         self.role_sent = False
         self.finish_reason: str | None = None
         self.usage: dict[str, object] | None = None
@@ -862,7 +865,7 @@ class OpenAIStreamConverter:
             "created": int(time.time()),
             "model": self.model,
             "choices": [
-                {"index": 0, "delta": delta, "finish_reason": finish_reason}
+                {"index": self.candidate_index, "delta": delta, "finish_reason": finish_reason}
             ],
         }
 
@@ -875,6 +878,20 @@ class OpenAIStreamConverter:
     # ---------- 事件 ----------
     def convert_event(self, event_type: str, payload: object) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
+        if event_type == "candidate_event" and isinstance(payload, Mapping):
+            index = payload.get("index")
+            kind = payload.get("type")
+            if not isinstance(index, int) or not isinstance(kind, str):
+                return out
+            converter = self._candidate_converters.get(index)
+            if converter is None:
+                converter = OpenAIStreamConverter(
+                    model=self.model, request_id=self.request_id,
+                    include_thoughts=self.include_thoughts,
+                    candidate_index=index,
+                )
+                self._candidate_converters[index] = converter
+            return converter.convert_event(kind, payload.get("payload"))
         if event_type == "usage":
             if isinstance(payload, Mapping):
                 self.usage = convert_usage(payload)
@@ -927,6 +944,10 @@ class OpenAIStreamConverter:
             out.append(self._envelope({"content": markdown}))
             return out
 
+        if event_type == "code_output" and isinstance(payload, str) and payload:
+            self._ensure_role(out)
+            out.append(self._envelope({"content": f"\n```\n{payload}\n```\n"}))
+            return out
         if event_type == "tool_calls":
             self._absorb_tool_calls(payload)
             return out
@@ -1056,6 +1077,8 @@ class OpenAIStreamConverter:
         if self.usage and not self.include_usage:
             final_chunk["usage"] = self.usage
         out.append(final_chunk)
+        for converter in self._candidate_converters.values():
+            out.extend(converter.finish())
         if self.include_usage and self.usage:
             out.append(
                 {

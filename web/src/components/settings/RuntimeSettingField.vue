@@ -29,7 +29,6 @@ const isMultiline = computed(
 
 const textLength = computed(() => String(props.modelValue ?? '').length)
 
-const numberStep = computed<number | 'any'>(() => (props.field.type === 'int?' ? 1 : 'any'))
 
 const enumOptions = computed(() => {
   const values = props.field.values ?? []
@@ -168,11 +167,8 @@ function clearNumber() {
         <div class="relative">
           <input
             :value="String(modelValue ?? '')"
-            type="number"
+            type="text"
             inputmode="decimal"
-            :step="numberStep"
-            :min="field.min"
-            :max="field.max"
             :disabled="disabled"
             placeholder="未设置"
             class="w-full px-3 py-2 pr-8 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all disabled:cursor-not-allowed disabled:opacity-60"

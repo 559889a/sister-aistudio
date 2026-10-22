@@ -69,6 +69,10 @@ def patch_settings(monkeypatch):
 def _fake_client(monkeypatch, raw_response: str) -> tuple[AIStudioClient, BrowserSession]:
     """真 client + 假 session：capture/replay 被截住，响应原文由用例给。"""
     session = BrowserSession(port=9222)
+    from aistudio_api.infrastructure.gateway.session_state import SessionContext
+
+    context = SessionContext(page=MagicMock(), snap_key="snap", auth_user="0", auth_file=None, base_template={})
+    session.ensure_ready = AsyncMock(return_value=context)
     session.capture_template = AsyncMock(
         return_value={
             "url": "https://example.com/generate",

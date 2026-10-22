@@ -22,12 +22,14 @@ from aistudio_api.infrastructure.upstreams.common import (
     channel_streaming_flag_enabled,
     contents_to_official,
     finalize_stream_probe,
-    maybe_channel_bypass,
     new_stream_probe,
     official_chunk_events,
     official_to_model_output,
+    prepare_channel_contents,
     upstream_http_error,
+    wire_generation_to_official,
     wire_safety_to_official,
+    wire_tool_config_to_official,
     wire_tools_to_official,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -67,7 +69,9 @@ class VertexExpressClient:
         self._client = genai.Client(
             vertexai=True,
             api_key=api_key,
-            http_options=types.HttpOptions(**http_options) if http_options else None,
+            http_options=types.HttpOptions(
+                **http_options, retry_options=types.HttpRetryOptions(attempts=1)
+            ),
         )
         self._project_id = project_id.strip()
         self._location = location.strip()
@@ -82,7 +86,8 @@ class VertexExpressClient:
         return None
 
     async def close(self) -> None:
-        return None
+        await self._client.aio.aclose()
+        self._client.close()
 
 
     def _model_path(self, model: str) -> str:
@@ -108,8 +113,9 @@ class VertexExpressClient:
         top_p: float | None,
         top_k: int | None,
         max_tokens: int | None,
+        generation_config_overrides: dict[str, object] | None,
     ) -> dict[str, object]:
-        config: dict[str, object] = {}
+        config = wire_generation_to_official(generation_config_overrides)
         if system_instruction_content is not None:
             config["system_instruction"] = {
                 "parts": contents_to_official([system_instruction_content])[0]["parts"]
@@ -128,14 +134,14 @@ class VertexExpressClient:
             config["top_k"] = top_k
         if max_tokens is not None:
             config["max_output_tokens"] = max_tokens
-        # shortcut: tool_config（wire 形状）与 generation_config_overrides（seed 等
-        # wire 独有项）未转换，Express 通道 v1 不支持——需要时再补
-        _ = tool_config
+        official_tool_config = wire_tool_config_to_official(tool_config)
+        if official_tool_config:
+            config["tool_config"] = official_tool_config
         return config
 
     def _call_kwargs(
         self, model: str, *, streaming: bool, **params: Any
-    ) -> tuple[dict[str, Any], BypassPlan | None]:
+    ) -> tuple[dict[str, Any], BypassPlan | None, str]:
         """(SDK 调用参数, bypass plan|None)。plan 本地传递，避免并发请求踩状态。
 
         streaming 标志只配流式调用：非流式（unary）请求带
@@ -144,9 +150,10 @@ class VertexExpressClient:
         contents: list[AistudioContent] | None = params.get("contents")
         system_instruction_content = params.get("system_instruction_content")
         plan = None
+        prefill = ""
         if contents:
-            contents, system_instruction_content, plan = maybe_channel_bypass(
-                contents, system_instruction_content
+            contents, system_instruction_content, plan, prefill = prepare_channel_contents(
+                contents, system_instruction_content, model=model
             )
             contents, system_instruction_content = apply_channel_sentinels(
                 contents, system_instruction_content
@@ -160,6 +167,7 @@ class VertexExpressClient:
             top_p=params.get("top_p"),
             top_k=params.get("top_k"),
             max_tokens=params.get("max_tokens"),
+            generation_config_overrides=params.get("generation_config_overrides"),
         )
         if plan is not None:
             config["tools"] = bypass_tools_official(plan.tool_name)
@@ -176,6 +184,7 @@ class VertexExpressClient:
                 "config": config or None,
             },
             plan,
+            prefill,
         )
 
     def _dump(self, chunk) -> dict:
@@ -187,7 +196,7 @@ class VertexExpressClient:
     async def generate_content(self, *, model: str, **params: Any) -> ModelOutput:
         from google.genai import errors as genai_errors
 
-        kwargs, plan = self._call_kwargs(model, streaming=False, **params)
+        kwargs, plan, prefill = self._call_kwargs(model, streaming=False, **params)
         probe = new_stream_probe("vertex_express", model)
         try:
             resp = await self._client.aio.models.generate_content(**kwargs)
@@ -212,7 +221,12 @@ class VertexExpressClient:
                 apply_extractor_nonstream,
             )
 
-            apply_extractor_nonstream(output, ChannelBypassExtractor(plan))
+            apply_extractor_nonstream(output, data, plan)
+        if prefill:
+            from aistudio_api.application.prefill import rejoin
+
+            for candidate in output.candidates:
+                candidate.text = rejoin(prefill, candidate.text)
         return output
 
     async def stream_generate_content(
@@ -220,16 +234,24 @@ class VertexExpressClient:
     ) -> AsyncIterator[tuple[str, object]]:
         from google.genai import errors as genai_errors
 
-        kwargs, plan = self._call_kwargs(model, streaming=True, **params)
+        kwargs, plan, prefill = self._call_kwargs(model, streaming=True, **params)
         extractor = ChannelBypassExtractor(plan) if plan is not None else None
         probe = new_stream_probe("vertex_express", model)
         from aistudio_api.infrastructure.upstreams.common import (
             touch_stream_probe,
         )
+        stream = None
+        from aistudio_api.application.prefill import StreamDeduper
+
+        dedupers: dict[int, StreamDeduper] = {}
+        pending_prefill: set[int] = set()
 
         try:
             stream = await self._client.aio.models.generate_content_stream(**kwargs)
             yield ("status", 200)
+            if prefill:
+                yield ("body", prefill)
+                pending_prefill.add(0)
             async for chunk in stream:
                 data = self._dump(chunk)
                 body_chars = sum(
@@ -245,16 +267,46 @@ class VertexExpressClient:
                     if isinstance(p, dict) and p.get("thought")
                 )
                 touch_stream_probe(probe, body_chars=body_chars, thinking_chars=think_chars)
-                if extractor is not None:
-                    for event in extractor.feed_data(data):
-                        yield event
-                else:
-                    for event in official_chunk_events(data):
-                        yield event
+                events = extractor.feed_data(data) if extractor is not None else official_chunk_events(data)
+                for kind, payload in events:
+                    index = 0
+                    if kind == "candidate_event" and isinstance(payload, dict):
+                        index = int(payload["index"])
+                        kind, payload = str(payload["type"]), payload["payload"]
+                    if kind == "body" and prefill:
+                        if index not in pending_prefill:
+                            yield ("candidate_event", {"index": index, "type": "body", "payload": prefill})
+                            pending_prefill.add(index)
+                        if index not in dedupers:
+                            dedupers[index] = StreamDeduper(prefill)
+                        deduper = dedupers[index]
+                        payload = deduper.feed(str(payload))
+                        if not payload:
+                            continue
+                    yield (kind, payload) if index == 0 else ("candidate_event", {"index": index, "type": kind, "payload": payload})
             if extractor is not None:
-                for event in extractor.finish_events():
-                    yield event
+                for kind, payload in extractor.finish_events():
+                    index = 0
+                    if kind == "candidate_event" and isinstance(payload, dict):
+                        index = int(payload["index"])
+                        kind, payload = str(payload["type"]), payload["payload"]
+                    if kind == "body" and prefill:
+                        if index not in pending_prefill:
+                            yield ("body", prefill) if index == 0 else ("candidate_event", {"index": index, "type": "body", "payload": prefill})
+                            pending_prefill.add(index)
+                        if index not in dedupers:
+                            dedupers[index] = StreamDeduper(prefill)
+                        payload = dedupers[index].feed(str(payload))
+                        if not payload:
+                            continue
+                    yield (kind, payload) if index == 0 else ("candidate_event", {"index": index, "type": kind, "payload": payload})
+            for index, deduper in dedupers.items():
+                tail = deduper.flush()
+                if tail:
+                    yield ("body", tail) if index == 0 else ("candidate_event", {"index": index, "type": "body", "payload": tail})
             yield ("done", None)
+        except RequestError as exc:
+            raise attach_stream_probe(exc, finalize_stream_probe(probe, exc)) from exc
         except genai_errors.APIError as exc:
             raise attach_stream_probe(
                 upstream_http_error(
@@ -269,3 +321,8 @@ class VertexExpressClient:
                 RequestError(502, f"vertex_express transport: {exc}"),
                 finalize_stream_probe(probe, exc),
             ) from exc
+        finally:
+            if stream is not None:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()

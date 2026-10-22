@@ -225,18 +225,22 @@ class CDPConnection:
             "params": params or {},
         }
         try:
-            await self.ws.send(json.dumps(payload))
-        except Exception as e:
-            self._closed = True
-            self._futures.pop(req_id, None)
-            raise RuntimeError(f"CDP connection closed: {e}") from e
+            try:
+                await self.ws.send(json.dumps(payload))
+            except Exception as e:
+                self.fail_pending_futures(RuntimeError(f"CDP connection closed: {e}"))
+                raise RuntimeError(f"CDP connection closed: {e}") from e
 
-        no_deadline = timeout_s is None or timeout_s <= 0
-        try:
+            no_deadline = timeout_s is None or timeout_s <= 0
             if self._liveness_checker is None:
                 if no_deadline:
                     return await fut
-                return await asyncio.wait_for(fut, timeout=timeout_s)
+                try:
+                    return await asyncio.wait_for(fut, timeout=timeout_s)
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"CDP command {method} timed out after {timeout_s}s"
+                    ) from exc
 
             deadline = loop.time() + (timeout_s or 0.0)
             while True:
@@ -250,7 +254,6 @@ class CDPConnection:
                 else:
                     remaining = deadline - loop.time()
                     if remaining <= 0:
-                        self._futures.pop(req_id, None)
                         raise TimeoutError(
                             f"CDP command {method} timed out after {timeout_s}s"
                         )
@@ -262,9 +265,12 @@ class CDPConnection:
                 except TimeoutError:
                     if fut.done():
                         return fut.result()
-        except Exception:
+        finally:
             self._futures.pop(req_id, None)
-            raise
+            if not fut.done():
+                fut.cancel()
+            elif not fut.cancelled():
+                fut.exception()
 
     def on(
         self, event: str, callback: Callable[[dict[str, object]], object]
@@ -289,6 +295,13 @@ class CDPConnection:
     async def close(self) -> None:
         """Close WebSocket connection cleanly."""
         self._closed = True
+        self.fail_pending_futures(RuntimeError("CDP connection closed"))
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -308,10 +321,13 @@ class CDPPage:
         self._unsubscribers: list[Callable[[], None]] = []
         self.has_stream_binding: bool = False
         self._cached_cookies: dict[str, str] | None = None
+        self.account_auth_file: str | None = None
         # $rpc/ 网络事件证据（gateway transport 记录；传输失败时用来回答「连接被谁断的」）
         self.has_net_trace: bool = False
         self.rpc_net_requests: dict[str, dict[str, object]] = {}
         self.rpc_net_failures: list[dict[str, object]] = []
+        self.browser_context_id: str | None = None
+        self._context_connection: CDPConnection | None = None
 
     def _track_listener(self, unsub: Callable[[], None]) -> Callable[[], None]:
         self._unsubscribers.append(unsub)
@@ -527,15 +543,16 @@ class CDPPage:
             pass
         finally:
             unsub()
-            # Update actual URL from window.location
-            try:
-                actual_url = await self.evaluate(
-                    "() => window.location.href", timeout_s=5.0
-                )
-                if actual_url is not None:
-                    self._last_url = str(actual_url)
-            except Exception:
-                pass
+            nav_done.cancel()
+            task = asyncio.current_task()
+            if task is None or not task.cancelling():
+                # Resolve redirects without delaying cancellation with another CDP command.
+                with contextlib.suppress(Exception):
+                    actual_url = await self.evaluate(
+                        "() => window.location.href", timeout_s=5.0
+                    )
+                    if actual_url is not None:
+                        self._last_url = str(actual_url)
 
     async def title(self) -> str:
         """Get document title."""
@@ -612,35 +629,13 @@ class CDPPage:
         """Focus target and dispatch Control+Enter shortcut."""
         expr = f"""() => {{
             const el = document.querySelector({json.dumps(selector)});
-            if (el) {{
-                el.focus();
-                const evDown = new KeyboardEvent('keydown', {{
-                    key: 'Enter',
-                    code: 'Enter',
-                    keyCode: 13,
-                    which: 13,
-                    ctrlKey: true,
-                    bubbles: true,
-                    cancelable: true,
-                }});
-                el.dispatchEvent(evDown);
-                const evUp = new KeyboardEvent('keyup', {{
-                    key: 'Enter',
-                    code: 'Enter',
-                    keyCode: 13,
-                    which: 13,
-                    ctrlKey: true,
-                    bubbles: true,
-                    cancelable: true,
-                }});
-                el.dispatchEvent(evUp);
-                return true;
-            }}
-            return false;
+            if (!el) return false;
+            el.focus();
+            return true;
         }}"""
         try:
-            # Also send raw Input.dispatchKeyEvent with Ctrl modifier for Chromium shortcut dispatch
-            await self.evaluate(expr)
+            if not await self.evaluate(expr):
+                return False
             await self.cdp.send(
                 "Input.dispatchKeyEvent",
                 {
@@ -649,8 +644,6 @@ class CDPPage:
                     "windowsVirtualKeyCode": 13,
                     "code": "Enter",
                     "key": "Enter",
-                    "text": "\r",
-                    "unmodifiedText": "\r",
                 },
             )
             await self.cdp.send(
@@ -746,12 +739,13 @@ class CDPPage:
         }
 
     async def clear_cookies(self) -> None:
-        """Clear all browser cookies."""
+        """Clear cookies only in this page's browser context."""
         self._cached_cookies = None
-        try:
-            await self.cdp.send("Network.clearBrowserCookies")
-        except Exception as e:
-            log.debug("清除浏览器 Cookie 失败: %s", e)
+        connection = self._context_connection or self.cdp
+        await connection.send(
+            "Storage.clearCookies",
+            {"browserContextId": self.browser_context_id} if self.browser_context_id else {},
+        )
 
     def on_request(
         self, callback: Callable[[dict[str, object]], object]
@@ -835,6 +829,14 @@ class CDPPage:
         with contextlib.suppress(Exception):
             await self.cdp.send("Page.close")
         await self.cdp.close()
+        if self._context_connection is not None:
+            with contextlib.suppress(Exception):
+                await self._context_connection.send(
+                    "Target.disposeBrowserContext",
+                    {"browserContextId": self.browser_context_id},
+                )
+            await self._context_connection.close()
+            self._context_connection = None
 
 
 class CDPClient:
@@ -887,8 +889,11 @@ class CDPClient:
     async def connect_page(self, block_assets: bool = True) -> CDPPage:
         """Connect to an existing page target or create one with auto-retry on transient drops."""
         await self.wait_until_ready()
+        if self.page is not None and not self.page.is_closed():
+            return self.page
         last_exc: Exception | None = None
         for attempt in range(3):
+            conn: CDPConnection | None = None
             try:
                 targets = await self.get_targets()
                 page_targets = [
@@ -899,15 +904,11 @@ class CDPClient:
                 page_target = None
                 if page_targets:
                     page_target = page_targets[0]
-                    # Prune any spare about:blank or crashed tabs to save ~50MB RAM each
+                    # Only blank spare tabs are disposable; another account may still be draining.
                     for spare in page_targets[1:]:
                         spare_id = str(spare.get("id") or "")
-                        if spare_id:
-                            with contextlib.suppress(Exception):
-                                async with httpx.AsyncClient(timeout=2.0) as client:
-                                    await client.put(
-                                        f"{self.base_url}/json/close/{spare_id}"
-                                    )
+                        if spare_id and spare.get("url") == "about:blank":
+                            await self.close_target(spare_id)
                 if not page_target:
                     async with httpx.AsyncClient(timeout=5.0) as client:
                         resp = await client.put(f"{self.base_url}/json/new")
@@ -924,7 +925,11 @@ class CDPClient:
                 await page.init_domains(block_assets=block_assets)
                 self.page = page
                 return page
-            except Exception as e:
+            except BaseException as e:
+                if conn is not None:
+                    await conn.close()
+                if not isinstance(e, Exception):
+                    raise
                 last_exc = e
                 log.debug("连接页面第 %d 次尝试失败: %s", attempt + 1, e)
                 if attempt < 2:
@@ -934,24 +939,43 @@ class CDPClient:
         ) from last_exc
 
     async def create_new_page(self, block_assets: bool = True) -> CDPPage:
-        """Create a dedicated new tab target and connect CDP Page to it."""
+        """Create a cookie-isolated tab inside the same Chromium process."""
         await self.wait_until_ready()
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.put(f"{self.base_url}/json/new")
-            resp.raise_for_status()
-            page_target = resp.json()
-
-        ws_url = str(page_target.get("webSocketDebuggerUrl") or "")
-        target_id = str(page_target.get("id") or "")
-        conn = CDPConnection(ws_url)
+        version = await self.get_version()
+        browser_conn = CDPConnection(str(version.get("webSocketDebuggerUrl") or ""))
+        context_id = ""
+        conn: CDPConnection | None = None
         try:
+            await browser_conn.connect()
+            context = await browser_conn.send("Target.createBrowserContext")
+            context_id = str(context.get("browserContextId") or "")
+            if not context_id:
+                raise RuntimeError("CDP did not create an isolated browser context")
+            target = await browser_conn.send(
+                "Target.createTarget",
+                {"url": "about:blank", "browserContextId": context_id},
+            )
+            target_id = str(target.get("targetId") or "")
+            targets = await self.get_targets()
+            page_target = next((item for item in targets if item.get("id") == target_id), None)
+            if page_target is None:
+                raise RuntimeError("CDP isolated page target is missing")
+            conn = CDPConnection(str(page_target.get("webSocketDebuggerUrl") or ""))
             await conn.connect()
             page = CDPPage(conn, target_id)
+            page.browser_context_id = context_id
+            page._context_connection = browser_conn
             await page.init_domains(block_assets=block_assets)
             return page
-        except Exception:
-            await conn.close()
-            await self.close_target(target_id)
+        except BaseException:
+            if conn is not None:
+                await conn.close()
+            if context_id:
+                with contextlib.suppress(Exception):
+                    await browser_conn.send(
+                        "Target.disposeBrowserContext", {"browserContextId": context_id}
+                    )
+            await browser_conn.close()
             raise
 
     async def close_target(self, target_id: str) -> None:

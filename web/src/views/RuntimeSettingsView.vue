@@ -87,11 +87,11 @@ function wireValue(field: RuntimeSettingField, raw: FormValue | undefined): Runt
   const text = String(raw ?? '')
   if (field.type === 'int?') {
     const trimmed = text.trim()
-    return trimmed === '' ? null : Number.parseInt(trimmed, 10)
+    return trimmed === '' ? null : Number(trimmed)
   }
   if (field.type === 'float?') {
     const trimmed = text.trim()
-    return trimmed === '' ? null : Number.parseFloat(trimmed)
+    return trimmed === '' ? null : Number(trimmed)
   }
   return text
 }
@@ -102,6 +102,10 @@ function baselineValue(field: RuntimeSettingField): RuntimeSettingValue {
 }
 
 function isFieldDirty(field: RuntimeSettingField): boolean {
+  const error = validateField(field)
+  if (error) {
+    return form.value[field.key] !== rawFromWire(field, baselineValue(field))
+  }
   return JSON.stringify(wireValue(field, form.value[field.key]))
     !== JSON.stringify(baselineValue(field))
 }
@@ -267,6 +271,7 @@ async function handleSave() {
   saveError.value = ''
   const errors: Record<string, string> = {}
   for (const field of fields.value) {
+    if (!isFieldDirty(field)) continue
     const message = validateField(field)
     if (message) {
       errors[field.key] = message
@@ -550,7 +555,7 @@ onBeforeRouteLeave((_to, _from, next) => {
             :field="field"
             :model-value="form[field.key] ?? ''"
             :changed="isFieldDirty(field)"
-            :disabled="dependencyStates[field.key]?.disabled ?? false"
+            :disabled="saving || ((dependencyStates[field.key]?.disabled ?? false) && !validateField(field))"
             :disabled-hint="dependencyStates[field.key]?.hint ?? ''"
             :error="fieldErrors[field.key] ?? ''"
             @update:model-value="setFieldValue(field.key, $event)"
@@ -595,7 +600,7 @@ onBeforeRouteLeave((_to, _from, next) => {
               :field="field"
               :model-value="form[field.key] ?? ''"
               :changed="isFieldDirty(field)"
-              :disabled="dependencyStates[field.key]?.disabled ?? false"
+              :disabled="saving || ((dependencyStates[field.key]?.disabled ?? false) && !validateField(field))"
               :disabled-hint="dependencyStates[field.key]?.hint ?? ''"
               :error="fieldErrors[field.key] ?? ''"
               @update:model-value="setFieldValue(field.key, $event)"

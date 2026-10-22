@@ -6,15 +6,14 @@
 `stream_raw_events`，行为与现有端口**按构造对齐**），再把结果装回 `httpx.Response`——
 非流式塞官方 JSON，流式塞产出 ``data: {...}\\n\\n`` 帧的 async 迭代器。
 
-Phase 1（当前）：transport + 转换器 + `build_sdk_client`，**未接线到任何路由**，
-仅由测试用 fake gateway 驱动。Phase 2 在 OpenAI 端口 feature flag 试点。
+Gemini 原生端口使用本桥；OpenAI 端口直接消费同一网关事件，不经过 SDK。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import TYPE_CHECKING
 
 import httpx
@@ -31,7 +30,6 @@ from aistudio_api.application.api_service_gemini import (
     classify_gemini_error_payload,
     format_sse_error,
     format_sse_event,
-    format_sse_usage,
     generate_content_output,
     stream_raw_events,
     to_gemini_finish_reason,
@@ -86,21 +84,20 @@ def _single_response_payload(prepared: PreparedRequest, output: ModelOutput) -> 
             GeminiCandidateResponse(
                 content=GeminiContentResponse(
                     parts=to_gemini_parts(
-                        output.text,
-                        function_calls=output.function_calls,
-                        function_responses=output.function_responses,
-                        thinking=output.thinking if include_thoughts else "",
-                        images=output.images,
-                        reasoning_images=(output.reasoning_images if include_thoughts else []),
+                        candidate.text,
+                        function_calls=candidate.function_calls,
+                        function_responses=candidate.function_responses,
+                        thinking=candidate.thinking if include_thoughts else "",
+                        images=candidate.images,
+                        reasoning_images=(candidate.reasoning_images if include_thoughts else []),
                     ),
                 ),
-                finishReason=to_gemini_finish_reason(
-                    output.candidates[0].finish_reason if output.candidates else None
-                ),
-                index=0,
+                finishReason=to_gemini_finish_reason(candidate.finish_reason),
+                index=index,
             )
+            for index, candidate in enumerate(output.candidates)
         ],
-        usageMetadata=to_gemini_usage_metadata(output.usage),
+        usageMetadata=to_gemini_usage_metadata(output.usage) if output.usage else None,
         modelVersion=prepared.normalized.model,
         responseId=output.response_id or None,
     )
@@ -164,9 +161,12 @@ class AistudioTransport(httpx.AsyncBaseTransport):
             return _http_exception_response(request, exc)
 
         async def _content() -> AsyncIterator[bytes]:
-            yield first
-            async for frame in frames:
-                yield frame
+            try:
+                yield first
+                async for frame in frames:
+                    yield frame
+            finally:
+                await frames.aclose()
 
         return httpx.Response(
             200, headers=_SSE_HEADERS, content=_content(), request=request
@@ -174,62 +174,66 @@ class AistudioTransport(httpx.AsyncBaseTransport):
 
     async def _sse_frames(
         self, model: str, req: GeminiGenerateContentRequest
-    ) -> AsyncIterator[bytes]:
-        """复用 /v1beta 流式渲染的事件语义（format_sse_event/usage），逐帧转 SSE。"""
+    ) -> AsyncGenerator[bytes, None]:
+        """Gateway events → indexed Gemini parts, finish reasons and shared usage."""
         prepared: PreparedRequest | None = None
         final_usage: dict[str, object] | None = None
-        final_finish_reason: str = "STOP"
+        finish_reasons: dict[int, str] = {}
         latest_response_id: str | None = None
-        buffered_sig: str | None = None
+        signatures: dict[int, str] = {}
+        source = stream_raw_events(model, req, self._gateway)
         try:
-            async for event_type, text in stream_raw_events(model, req, self._gateway):
+            async for event_type, text in source:
+                index = 0
                 if event_type == "prepared":
                     prepared = text if isinstance(text, PreparedRequest) else None
-                    buffered_sig = None
                     continue
                 if event_type in ("status", "attempt", "done"):
                     continue
+                if event_type == "candidate_event" and isinstance(text, dict):
+                    index = int(text["index"])
+                    event_type, text = str(text["type"]), text.get("payload")
                 if event_type == "usage":
-                    final_usage = text if isinstance(text, dict) else None
-                elif event_type == "finish_reason":
-                    final_finish_reason = (
-                        to_gemini_finish_reason(text) if isinstance(text, int) else str(text)
-                    )
-                elif event_type == "response_id":
+                    if isinstance(text, dict):
+                        final_usage = text
+                    continue
+                if event_type == "finish_reason":
+                    finish_reasons[index] = to_gemini_finish_reason(text) if isinstance(text, int) else str(text)
+                    continue
+                if event_type == "response_id":
                     latest_response_id = str(text)
-                elif event_type == "thought_signature":
-                    buffered_sig = str(text)
-                else:
-                    include_thoughts = (
-                        prepared.include_thoughts if prepared is not None else True
-                    )
-                    if not include_thoughts and event_type in ("thinking", "reasoning_images"):
-                        continue
-                    frame = format_sse_event(
-                        event_type,
-                        text,
-                        model_version=(
-                            prepared.normalized.model if prepared is not None else model
-                        ),
-                        response_id=latest_response_id,
-                        thought_signature=buffered_sig,
-                    )
-                    buffered_sig = None
-                    if frame:
-                        yield frame.encode("utf-8")
-            usage_frame = format_sse_usage(
-                final_usage,
-                finish_reason=final_finish_reason,
-                model_version=(prepared.normalized.model if prepared is not None else model),
-                response_id=latest_response_id,
-            )
-            yield usage_frame.encode("utf-8")
+                    continue
+                if event_type == "thought_signature":
+                    signatures[index] = str(text)
+                    continue
+                include_thoughts = prepared.include_thoughts if prepared is not None else True
+                if not include_thoughts and event_type in ("thinking", "reasoning_images"):
+                    continue
+                frame = format_sse_event(
+                    event_type, text,
+                    model_version=prepared.normalized.model if prepared is not None else model,
+                    response_id=latest_response_id,
+                    thought_signature=signatures.pop(index, None),
+                    candidate_index=index,
+                )
+                if frame:
+                    yield frame.encode("utf-8")
+            payload: dict[str, object] = {
+                "candidates": [
+                    {"index": index, "finishReason": reason, "content": {"role": "model", "parts": []}}
+                    for index, reason in sorted(finish_reasons.items())
+                ],
+                "modelVersion": prepared.normalized.model if prepared is not None else model,
+            }
+            if final_usage:
+                payload["usageMetadata"] = to_gemini_usage_metadata(final_usage).model_dump(exclude_none=True)
+            if latest_response_id:
+                payload["responseId"] = latest_response_id
+            yield ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
         except Exception as exc:
-            # 与 /v1beta 流式渲染同口径：首帧已发出后失败，状态码改不了，
-            # 把错误装成流内 error 帧收尾（handle_attempt_exception 的浏览器
-            # 重启等副作用在异常抛出时已经发生）。
-            logger.warning("SDK 桥流式中途失败: %s", exc)
             yield format_sse_error(exc).encode("utf-8")
+        finally:
+            await source.aclose()
 
 
 _SDK_CACHE: dict[int, tuple[AIStudioClient, GenaiClient]] = {}
@@ -242,8 +246,19 @@ def get_sdk_client(gateway: AIStudioClient) -> GenaiClient:
         return entry[1]  # type: ignore[no-any-return]
     sdk = build_sdk_client(gateway)
     _SDK_CACHE[id(gateway)] = (gateway, sdk)
-    # shortcut: 没关旧 SDK 的 httpx.AsyncClient——transport 无真实连接，不泄漏 socket
     return sdk
+
+
+async def close_sdk_clients() -> None:
+    """Release cached SDK transports when the gateway lifespan ends."""
+    entries = list(_SDK_CACHE.values())
+    _SDK_CACHE.clear()
+    for _gateway, sdk in entries:
+        async_client = sdk._api_client._http_options.httpx_async_client
+        if async_client is not None:
+            await async_client.aclose()
+        await sdk.aio.aclose()
+        sdk.close()
 
 
 def build_sdk_client(gateway: AIStudioClient):

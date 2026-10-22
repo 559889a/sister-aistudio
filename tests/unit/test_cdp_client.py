@@ -241,9 +241,10 @@ async def test_cdp_client_connect_page_success_and_prune():
 
     fake_targets = [
         {"id": "t1", "type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p1"},
-        {"id": "t2", "type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p2"},
+        {"id": "t2", "type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p2"},
     ]
     client.get_targets = AsyncMock(return_value=fake_targets)
+    client.close_target = AsyncMock()
 
     with patch(
         "aistudio_api.infrastructure.browser.cdp_client.CDPConnection"
@@ -258,6 +259,11 @@ async def test_cdp_client_connect_page_success_and_prune():
         ):
             page = await client.connect_page(block_assets=True)
             assert page.target_id == "t1"
+            client.close_target.assert_awaited_once_with("t2")
+            client.get_targets.reset_mock()
+            mock_conn._closed = False
+            assert await client.connect_page() is page
+            client.get_targets.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -295,3 +301,142 @@ async def test_cdp_send_positive_timeout_still_times_out():
 
     with pytest.raises(TimeoutError, match=r"timed out after 0\.05s"):
         await conn.send("Runtime.evaluate", {"expression": "1"}, timeout_s=0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_send", [False, True])
+async def test_cancelled_cdp_command_releases_future(cancel_during_send):
+    conn = CDPConnection("ws://fake/page")
+    dispatched = asyncio.Event()
+    conn.ws = AsyncMock()
+
+    async def send(_payload):
+        dispatched.set()
+        if cancel_during_send:
+            await asyncio.Event().wait()
+
+    conn.ws.send = send
+    conn.set_liveness_checker(lambda: True)
+    task = asyncio.create_task(conn.send("Runtime.evaluate", timeout_s=None))
+    await dispatched.wait()
+    future = next(iter(conn._futures.values()))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn._futures == {}
+    assert future.cancelled()
+    assert not conn._closed
+
+
+@pytest.mark.asyncio
+async def test_navigation_cancellation_removes_listener_without_location_probe():
+    conn = MagicMock(spec=CDPConnection)
+    conn.send = AsyncMock(return_value={})
+    unsub = MagicMock()
+    conn.on.return_value = unsub
+    page = CDPPage(conn, "page")
+    dispatched = asyncio.Event()
+
+    async def send(*_args, **_kwargs):
+        dispatched.set()
+        return {}
+
+    conn.send.side_effect = send
+    page.evaluate = AsyncMock()
+    task = asyncio.create_task(page.goto("https://example.test"))
+    await dispatched.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    unsub.assert_called_once()
+    page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, RuntimeError("domain failed"), asyncio.CancelledError()])
+async def test_isolated_tab_disposes_only_its_cookie_context(failure):
+    from aistudio_api.infrastructure.browser.cdp_client import CDPClient
+
+    client = CDPClient(9222)
+    client.wait_until_ready = AsyncMock()
+    client.get_version = AsyncMock(return_value={"webSocketDebuggerUrl": "ws://fake/browser"})
+    client.get_targets = AsyncMock(return_value=[
+        {"id": "isolated", "webSocketDebuggerUrl": "ws://fake/isolated"}
+    ])
+    browser = MagicMock(spec=CDPConnection)
+    browser.connect = AsyncMock()
+    browser.close = AsyncMock()
+    browser.send = AsyncMock(side_effect=[
+        {"browserContextId": "cookie-jar"}, {"targetId": "isolated"}, {},
+    ])
+    target = MagicMock(spec=CDPConnection)
+    target.connect = AsyncMock()
+    target.close = AsyncMock()
+    target.send = AsyncMock(return_value={})
+    with (
+        patch("aistudio_api.infrastructure.browser.cdp_client.CDPConnection", side_effect=[browser, target]),
+        patch.object(CDPPage, "init_domains", AsyncMock(side_effect=failure)),
+    ):
+        if failure is None:
+            page = await client.create_new_page()
+            assert page.browser_context_id == "cookie-jar"
+            assert client.page is None
+            await page.close()
+        else:
+            with pytest.raises(type(failure)):
+                await client.create_new_page()
+    browser.send.assert_any_await("Target.createBrowserContext")
+    browser.send.assert_any_await(
+        "Target.createTarget", {"url": "about:blank", "browserContextId": "cookie-jar"}
+    )
+    browser.send.assert_any_await(
+        "Target.disposeBrowserContext", {"browserContextId": "cookie-jar"}
+    )
+    target.close.assert_awaited_once()
+    browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cookie_clear_targets_only_this_browser_context():
+    conn = MagicMock(spec=CDPConnection)
+    conn.send = AsyncMock(return_value={})
+    page = CDPPage(conn, "isolated")
+    page.browser_context_id = "old-account-jar"
+    await page.clear_cookies()
+    conn.send.assert_awaited_once_with(
+        "Storage.clearCookies", {"browserContextId": "old-account-jar"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_cdp_close_rejects_waiter_without_running_receive_loop():
+    conn = CDPConnection("ws://fake/page")
+    conn.ws = AsyncMock()
+    dispatched = asyncio.Event()
+
+    async def send(_payload):
+        dispatched.set()
+
+    conn.ws.send = send
+    task = asyncio.create_task(conn.send("Runtime.evaluate", timeout_s=None))
+    await dispatched.wait()
+    await conn.close()
+    with pytest.raises(RuntimeError, match="CDP connection closed"):
+        await task
+    assert not conn._futures
+
+
+@pytest.mark.asyncio
+async def test_control_enter_needs_target_and_dispatches_one_key_pair():
+    conn = MagicMock(spec=CDPConnection)
+    conn.send = AsyncMock(return_value={})
+    page = CDPPage(conn, "page")
+    page.evaluate = AsyncMock(return_value=False)
+    assert await page.send_control_enter() is False
+    conn.send.assert_not_awaited()
+    page.evaluate.return_value = True
+    assert await page.send_control_enter() is True
+    assert conn.send.await_count == 2
+    assert "KeyboardEvent" not in page.evaluate.call_args.args[0]
+    assert conn.send.call_args_list[0].args[1]["type"] == "rawKeyDown"
+    assert conn.send.call_args_list[1].args[1]["type"] == "keyUp"

@@ -176,11 +176,11 @@ class AIStudioClient:
     ) -> ModelOutput:
         """把上游响应还原成客户端该看到的样子（bypass 提取 + 预填充拼回）。"""
         plan = captured.bypass_plan
-        if plan is not None:
-            output = restore_non_stream(output, raw_text, plan)
-        if output.candidates and captured.prefill_text:
-            candidate = output.candidates[0]
-            candidate.text = rejoin_prefill(captured.prefill_text, candidate.text)
+        for index, candidate in enumerate(output.candidates):
+            if plan is not None:
+                restore_non_stream(output, raw_text, plan, candidate_index=index)
+            if captured.prefill_text:
+                candidate.text = rejoin_prefill(captured.prefill_text, candidate.text)
         return output
 
     async def stream_generate_content(
@@ -222,13 +222,12 @@ class AIStudioClient:
             )
             if not captured:
                 raise RequestError(0, "无法拦截请求")
+            stream = self._streaming_gateway.stream_chat(captured=captured, model=model)
             try:
-                async for event in self._streaming_gateway.stream_chat(
-                    captured=captured,
-                    model=model,
-                ):
+                async for event in stream:
                     yield event
             finally:
+                await stream.aclose()
                 # binding 只活这一条请求：结束就把输入框清空（不点发送、不按 Enter）
                 await self._session.clear_prompt()
 

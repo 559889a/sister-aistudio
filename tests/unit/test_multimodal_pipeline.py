@@ -42,7 +42,13 @@ def test_multimodal_zero_disk_io_pipeline():
 @pytest.mark.asyncio
 async def test_generate_image_tools_selection():
     """Verify tool override precedence and use_default_tools handling."""
+    from unittest.mock import MagicMock
+
+    from aistudio_api.infrastructure.gateway.session_state import SessionContext
     client = AIStudioClient(port=9222)
+    context = SessionContext(page=MagicMock(), snap_key="snap", auth_user="0", auth_file=None, base_template={})
+    client.session.ensure_ready = AsyncMock(return_value=context)
+    client.session.clear_prompt = AsyncMock()
     captured_tools = []
 
     async def mock_capture_request(*args, **kwargs):

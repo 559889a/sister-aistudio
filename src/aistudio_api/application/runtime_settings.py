@@ -17,9 +17,10 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from aistudio_api.config import resolve_data_dir
+from aistudio_api.infrastructure.utils.common import atomic_write_json
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("settings")
@@ -283,7 +284,8 @@ def _coerce(item: dict[str, Any], raw: object) -> Any:
         if raw is None or raw == "":
             return None
         try:
-            value = int(raw) if kind == "int?" else float(raw)
+            numeric = cast(str | int | float, raw)
+            value = int(numeric) if kind == "int?" else float(numeric)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{key}: 需要数字，得到 {raw!r}") from exc
         low = item.get("min")
@@ -331,12 +333,6 @@ class RuntimeSettings:
             except ValueError as exc:
                 log.warning("忽略非法设置项: %s", exc)
 
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(self._values, ensure_ascii=False, indent=2, sort_keys=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(payload + "\n", encoding="utf-8")
-        tmp.replace(self._path)
 
     # ---------- 读写 ----------
     def values(self) -> dict[str, Any]:
@@ -358,8 +354,9 @@ class RuntimeSettings:
                 raise ValueError(f"未知设置项: {key}")
             validated[str(key)] = _coerce(item, raw)
         with self._lock:
-            self._values.update(validated)
-            self._save()
+            values = {**self._values, **validated}
+            atomic_write_json(self._path, values)
+            self._values = values
         log.info("运行期设置已更新: %s", ", ".join(sorted(validated)))
         return self.values()
 

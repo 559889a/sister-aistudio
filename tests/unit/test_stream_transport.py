@@ -252,3 +252,125 @@ async def test_replay_failure_logs_cdp_net_layer_evidence(caplog):
     assert "net::ERR_CONNECTION_RESET" in caplog.text
     # 证据里带响应头状态（none = 连响应头都没收到）
     assert "resp=none" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [ValueError("init failed"), asyncio.CancelledError()])
+async def test_stream_init_failure_removes_queue_and_preserves_original_error(monkeypatch, failure):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.transport._ensure_authorization_header",
+        AsyncMock(return_value={}),
+    )
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.on_binding = MagicMock()
+    page.add_binding = AsyncMock()
+    initialized = []
+    cleanup = []
+
+    async def evaluate(expression, args=None, **_kwargs):
+        if expression == STREAMING_INIT_JS:
+            initialized.append(args["rid"])
+            raise failure
+        if expression == STREAM_CLEANUP_JS:
+            cleanup.append(args)
+            raise RuntimeError("cleanup failed too")
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    source = transport.send_streaming_request(page, url="http://x", headers={}, body="[]")
+    with pytest.raises(type(failure)) as caught:
+        await anext(source)
+    assert caught.value is failure
+    assert transport.in_flight_count == 0
+    assert cleanup == initialized
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_stream_init_cleans_queue_and_browser_request(monkeypatch):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.transport._ensure_authorization_header",
+        AsyncMock(return_value={}),
+    )
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.on_binding = MagicMock()
+    page.add_binding = AsyncMock()
+    started = asyncio.Event()
+    cleanup = []
+
+    async def evaluate(expression, args=None, **_kwargs):
+        if expression == STREAMING_INIT_JS:
+            started.set()
+            await asyncio.Event().wait()
+        else:
+            cleanup.append(args)
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    source = transport.send_streaming_request(page, url="http://x", headers={}, body="[]")
+    task = asyncio.create_task(anext(source))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert transport.in_flight_count == 0
+    assert len(cleanup) == 1
+
+
+@pytest.mark.asyncio
+async def test_closing_stream_after_status_cleans_browser_and_queue(monkeypatch):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.transport._ensure_authorization_header",
+        AsyncMock(return_value={}),
+    )
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.has_stream_binding = False
+    page.is_closed.return_value = False
+    page.add_binding = AsyncMock()
+    listener = None
+    cleanup = []
+
+    def on_binding(_name, callback):
+        nonlocal listener
+        listener = callback
+
+    async def evaluate(expression, args=None, **_kwargs):
+        if expression == STREAMING_INIT_JS:
+            listener(json.dumps({"rid": args["rid"], "type": "status", "status": 200}))
+        else:
+            cleanup.append(args)
+
+    page.on_binding.side_effect = on_binding
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    source = transport.send_streaming_request(page, url="http://x", headers={}, body="[]")
+    assert await anext(source) == ("status", 200)
+    assert transport.in_flight_count == 1
+    await source.aclose()
+    assert transport.in_flight_count == 0
+    assert len(cleanup) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_init_transport_error_keeps_cause_despite_cleanup_cancellation(monkeypatch):
+    from aistudio_api.domain.errors import BrowserTransportError
+
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.transport._ensure_authorization_header",
+        AsyncMock(return_value={}),
+    )
+    transport = XHRStreamTransport()
+    page = MagicMock(spec=CDPPage)
+    page.on_binding = MagicMock()
+    page.add_binding = AsyncMock()
+    failure = RuntimeError("original CDP error")
+
+    async def evaluate(expression, args=None, **_kwargs):
+        if expression == STREAMING_INIT_JS:
+            raise failure
+        raise asyncio.CancelledError
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    with pytest.raises(BrowserTransportError, match="original CDP error") as caught:
+        await anext(transport.send_streaming_request(page, url="http://x", headers={}, body="[]"))
+    assert caught.value.__cause__ is failure
+    assert transport.in_flight_count == 0

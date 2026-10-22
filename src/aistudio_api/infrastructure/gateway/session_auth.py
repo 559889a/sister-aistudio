@@ -120,9 +120,10 @@ async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
     """Inject cookies from auth_file into target page with session-conflict filtering."""
     if not auth_file or not Path(auth_file).is_file():
         return False
+    page.account_auth_file = auth_file
     try:
         with suppress(Exception):
-            await page.cdp.send("Network.clearBrowserCookies")
+            await page.clear_cookies()
             await page.cdp.send("Network.clearBrowserCache")
 
         data = json.loads(Path(auth_file).read_text(encoding="utf-8"))

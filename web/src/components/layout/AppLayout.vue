@@ -27,12 +27,15 @@ async function handleRefresh() {
   if (refreshing.value) return
   refreshing.value = true
   try {
-    await Promise.allSettled([
+    const results = await Promise.all([
       accountsStore.fetchAll(),
       systemStore.fetchStats(),
-      systemStore.fetchRotation(),
       systemStore.checkHealth(),
     ])
+    if (results.some((ok) => !ok)) {
+      toast.error('部分数据刷新失败，保留上次成功的数据')
+      return
+    }
     toast.success('数据已刷新')
   } finally {
     refreshing.value = false

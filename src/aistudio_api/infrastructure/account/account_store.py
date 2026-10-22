@@ -330,17 +330,18 @@ class AccountStore:
         resolved_tier = tier or "Free"
         if account_id is None and email:
             for acc in registry.accounts.values():
-                if acc.email == email and acc.auth_user == auth_user:
+                if acc.email == email:
                     account_id = acc.id
-                    created_at = acc.created_at
-                    if resolved_tier == "Free" and acc.tier and acc.tier != "Free":
-                        resolved_tier = acc.tier
                     break
 
         if account_id is not None:
             existing = self._find_registered_account(registry, account_id)
             if existing is not None:
                 account_id = existing.id
+                created_at = existing.created_at
+                email = email or existing.email
+                if resolved_tier == "Free" and existing.tier != "Free":
+                    resolved_tier = existing.tier
         else:
             account_id = _generate_account_id()
 

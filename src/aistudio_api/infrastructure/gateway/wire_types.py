@@ -269,14 +269,16 @@ class AistudioPart:
 
     def to_wire(self) -> list[object]:
         wire = JspbArray()
+        if self.thought:
+            wire[PartIndex.THOUGHT_ALT_FLAG] = 1
+        if self.thought_signature:
+            wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
         if self.file_id:
             wire[PartIndex.FILE_DATA] = [self.file_id]
             return wire.compact()
         if self.inline_data:
             mime, b64 = self.inline_data
             wire[PartIndex.INLINE_DATA] = [mime, b64]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.function_call:
             name, args = self.function_call[0], self.function_call[1]
@@ -285,8 +287,6 @@ class AistudioPart:
             if call_id:
                 function_call.append(call_id)
             wire[PartIndex.FUNCTION_CALL_ALT] = function_call
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.function_response:
             name, response = self.function_response[0], self.function_response[1]
@@ -297,15 +297,11 @@ class AistudioPart:
             if call_id:
                 function_response.append(call_id)
             wire[PartIndex.FUNCTION_RESPONSE_ALT] = function_response
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.executable_code:
             lang, code = self.executable_code
             lang_code = 1 if str(lang).upper() in ("1", "PYTHON") else 0
             wire[PartIndex.EXECUTABLE_CODE] = [lang_code, code]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.code_execution_result:
             outcome, output = self.code_execution_result
@@ -320,19 +316,6 @@ class AistudioPart:
                 else int(outcome)
             )
             wire[PartIndex.CODE_RESULT] = [outcome_code, output]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
-            return wire.compact()
-        # Text part — mark as thinking when thought=True (wire index 12 = 1).
-        if self.thought:
-            wire[PartIndex.TEXT] = self.text
-            wire[PartIndex.THOUGHT_ALT_FLAG] = 1
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
-            return wire.compact()
-        if self.thought_signature:
-            wire[PartIndex.TEXT] = self.text
-            wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         wire[PartIndex.TEXT] = self.text
         return wire.compact()

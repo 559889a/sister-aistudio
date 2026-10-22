@@ -35,6 +35,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  if (props.modelValue) document.body.style.overflow = ''
 })
 
 watch(

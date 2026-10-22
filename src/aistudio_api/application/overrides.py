@@ -539,6 +539,7 @@ def _apply_thinking(
     )
     if resolution.thinking_config is not None:
         overrides["thinking_config"] = resolution.thinking_config
+    overrides["include_thoughts"] = resolution.include_thoughts
     applied.extend(resolution.applied)
     return resolution
 

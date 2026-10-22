@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from aistudio_api.infrastructure.gateway.wire_parser import (
@@ -373,3 +374,69 @@ def test_parse_response_chunk_with_ask_tool_payload():
             }
         ]
     }
+
+
+def _response_chunk(text="", finish=None):
+    return [[[[[[None, text]], "model"], finish]]]
+
+
+def test_parse_response_chunk_selects_candidate_without_merging():
+    chunk = [_response_chunk("first", 1)[0] + _response_chunk("second", 2)[0]]
+    assert parse_response_chunk(chunk).text == "first"
+    assert parse_response_chunk(chunk, 1).text == "second"
+    assert parse_response_chunk(chunk, 1).finish_reason == 2
+    assert parse_response_chunk(chunk, -1).text == ""
+    assert parse_response_chunk(chunk, 2).text == ""
+
+
+def test_parse_text_output_accepts_bare_wrapped_batches_and_newline_chunks():
+    first = _response_chunk("a")
+    second = _response_chunk("b", 1)
+    assert _iter_response_chunks(first) == [first]
+    for envelope in ([first, second], [[first, second]], [[first], [second]]):
+        assert _iter_response_chunks(envelope) == [first, second]
+        assert parse_text_output(json.dumps(envelope)).text == "ab"
+    assert parse_text_output(json.dumps(first)).text == "a"
+    assert parse_text_output(json.dumps(first) + "\n" + json.dumps(second)).text == "ab"
+
+
+def test_parse_text_output_merges_all_candidates_and_latest_nonempty_metadata():
+    first = [_response_chunk("a")[0] + _response_chunk("x")[0]]
+    first.extend([None, [5, 2, 7], None, None, None, None, "old-rid"])
+    second = [_response_chunk("b", 1)[0] + _response_chunk("y", 2)[0]]
+    metadata = [None, None, [6, 4, 10], None, None, None, None, "new-rid"]
+    empty_metadata = [[], None, [], None, None, None, None, ""]
+    output = parse_text_output(json.dumps([[first, second, metadata, empty_metadata]]))
+    assert [candidate.text for candidate in output.candidates] == ["ab", "xy"]
+    assert [candidate.finish_reason for candidate in output.candidates] == [1, 2]
+    assert output.usage["total_tokens"] == 10
+    assert output.response_id == "new-rid"
+
+
+def test_parse_response_part_handles_nontext_second_slot():
+    assert parse_response_part([None, []]).text == ""
+    assert parse_response_part([None, {}]).text == ""
+
+
+def test_parse_response_chunk_decodes_structured_code_payload_text():
+    part = [None] * 10
+    part[8] = [1, "print(1)"]
+    part[9] = [1, "1"]
+    chunk = [[[[[part], "model"]]]]
+    assert parse_response_chunk(chunk).code_output == "print(1)\n1"
+
+
+def test_nested_list_args_roundtrip_preserves_null_boolean_and_empty_containers():
+    from aistudio_api.infrastructure.gateway.wire_types import _encode_wire_args
+
+    args = {"nested": [{"x": [None, False, 0, "你好", []]}, {}], "single": [1], "empty": []}
+    assert _decode_wire_struct(_encode_wire_args(args)) == args
+
+
+def test_parse_text_output_retains_metadata_when_no_candidate_is_present():
+    chunk = [None, None, [5, 2, 7], None, None, None, None, "rid"]
+    for envelope in (chunk, [chunk], [[chunk]]):
+        output = parse_text_output(json.dumps(envelope))
+        assert output.candidates == []
+        assert output.usage["total_tokens"] == 7
+        assert output.response_id == "rid"

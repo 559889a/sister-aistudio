@@ -35,6 +35,11 @@ class SessionContext:
     in_flight: int = 0
     drain_event: asyncio.Event = field(default_factory=asyncio.Event)
 
+    def incr_in_flight(self) -> None:
+        """Start a lease and invalidate a previous empty-context notification."""
+        self.drain_event.clear()
+        self.in_flight += 1
+
     def decr_in_flight(self) -> None:
         """Decrement in_flight count and signal drain_event when empty."""
         self.in_flight = max(0, self.in_flight - 1)

@@ -235,11 +235,11 @@ def encode_schema_to_wire(
     if include_required and isinstance(required, (list, tuple, set)):
         wire[SchemaIndex.REQUIRED] = [str(x) for x in required]
 
-    min_props = schema.get("minProperties") or schema.get("min_properties")
+    min_props = schema.get("minProperties", schema.get("min_properties"))
     if isinstance(min_props, int):
         wire[SchemaIndex.MIN_PROPERTIES] = min_props
 
-    max_props = schema.get("maxProperties") or schema.get("max_properties")
+    max_props = schema.get("maxProperties", schema.get("max_properties"))
     if isinstance(max_props, int):
         wire[SchemaIndex.MAX_PROPERTIES] = max_props
 
@@ -251,11 +251,11 @@ def encode_schema_to_wire(
     if isinstance(maximum, (int, float)) and not isinstance(maximum, bool):
         wire[SchemaIndex.MAXIMUM] = maximum
 
-    min_len = schema.get("minLength") or schema.get("min_length")
+    min_len = schema.get("minLength", schema.get("min_length"))
     if isinstance(min_len, int):
         wire[SchemaIndex.MIN_LENGTH] = min_len
 
-    max_len = schema.get("maxLength") or schema.get("max_length")
+    max_len = schema.get("maxLength", schema.get("max_length"))
     if isinstance(max_len, int):
         wire[SchemaIndex.MAX_LENGTH] = max_len
 
@@ -265,11 +265,11 @@ def encode_schema_to_wire(
 
     _encode_schema_combiners(schema, wire, include_required)
 
-    max_items = schema.get("maxItems") or schema.get("max_items")
+    max_items = schema.get("maxItems", schema.get("max_items"))
     if isinstance(max_items, int):
         wire[SchemaIndex.MAX_ITEMS] = max_items
 
-    min_items = schema.get("minItems") or schema.get("min_items")
+    min_items = schema.get("minItems", schema.get("min_items"))
     if isinstance(min_items, int):
         wire[SchemaIndex.MIN_ITEMS] = min_items
 
@@ -759,6 +759,8 @@ def normalize_gemini_request(
             )
         if generation_config.logprobs is not None:
             generation_config_overrides["logprobs"] = generation_config.logprobs
+        if generation_config.candidateCount is not None:
+            generation_config_overrides["candidate_count"] = generation_config.candidateCount
         if generation_config.seed is not None:
             generation_config_overrides["seed"] = generation_config.seed
         if generation_config.mediaResolution is not None:

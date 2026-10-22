@@ -261,7 +261,7 @@ aistudio-api/
 |---|---|---|
 | pg/（浏览器+账号池） | 已恢复 | 用户已换新 cookie；隔离浏览器实测 flash 约 3.3 万输入 token、连续两发均返回 `PG_READY` + `STOP`。两发均未报告缓存计数，不能把未报告当成 0；正式服务未启动 |
 | express/（Vertex Express 官方 key） | ✅ 主力 | flash 正常；argon 有配额窗口（429 间歇属正常，自然恢复，勿追打）。**long decode 已通**：客户端传 `max_tokens>65536` 即触发 SDK 自动接力（argon 独有，1M 总预算，务必流式） |
-| cookie/（console batchGraphql） | ❌ 服务端灰度 | 凭据没失效（核心令牌实证同会话）；调用已被放行但返回**空 candidates**。已拍板：不逆向、等灰度 |
+| cookie/（console batchGraphql） | 已恢复并真机验证 | 旧 Hc4 签名仍可用；raw HTTP 200 是初始空 UI 列表 + thinking/合成工具 `COOKIE_READY` + `STOP`，不是上游空 candidates。原非流聚合丢工具/思考/图片，GraphQL 403/429 被压成 502，已修。真实非流/流式均返回 `COOKIE_SMOKE`；无 usage 属选择集未报，不伪造 0；历史 predict-denied 仍是真上游拒绝，非 PG cookie 失效 |
 | build-proxy / build-agent（逆向完成） | 📦 待网关化 | ProxyStreamedCall 全配方已验证（见 `逆向相关内容/aistudio-proxy-rpc-re-2026-10-21.md` §3 recipe）；实现可参考 `C:\build2api\src\build-proxy-channel.js`。**等用户拍板再动工** |
 
 ### 6.2 生产服务待上线变更（服务此刻停着，下次 `start.ps1` 全部生效）
@@ -271,6 +271,10 @@ aistudio-api/
 - GzipUploadTransport：express/cookie 上行 gzip（>96KB 自动压；httpx 必须同时换 `_content` 和 `stream`，有单测防回归）
 - usage 缓存观测已修正：内部统一 `cached_tokens`；Gemini 使用官方 `cachedContentTokenCount`（原 `cachedTokenCount` 会被 SDK 拒绝/丢弃），OpenAI 使用 `prompt_tokens_details.cached_tokens`；Gemini 保留显式 0，未报告则省略
 - 代理自动探测补 7897（网络形态已从 TUN 切到系统代理，Clash 7897；git 全局 http.proxy 也指 7897）
+- 本轮全项目功能 Debug：canonical 普通/内置工具与输出 Schema 转换、seed/stop/thinking 参数透传；图片 Base64 解码与 thinking token 合计；候选独立/尾部 metadata/截断保全；SDK 零重试与结束状态保真；流式成功和失败统一记账，非 PG 通道不碰 PG 调度
+- 蓝绿改为同一 Chromium 内 Cookie BrowserContext 隔离 + 任务级 lease；切换失败回滚，旧流实际排干（移除 12s 截止）；所有消费层在同任务 aclose，取消/捕获失败清 binding，旧请求 token 不清新 binding；CDP pending 与 Job HANDLE x64 声明已修
+- 账号切换/删除成功后才落 active/移除；JSON bundle 保留 id，重复导入保留身份；legacy cookie 分组稳定，429 streak 与今日统计分离，SessionExpired 24h，Windows 补 `tzdata`；设置写盘失败不改内存；停机刷新统计/释放 SDK
+- UI 轮询共享所有者与在途收尾、账号元数据优先级、改名失败草稿/弹窗、FileReader 更换取消、运行期非法数字 dirty/依赖可纠错及保存冻结已修；未添加安全护栏或做安全性测试
 
 ### 6.3 用户目标与下一步路线图（按优先级）
 
@@ -302,12 +306,11 @@ aistudio-api/
 - long decode / gzip 等特殊处理**只做 express**，pg/cookie 不动（用户拍板）。
 - `.env`/`data/` 永不入库；`逆向相关内容/`、`docs/`、`README_EN.md`、`image/` 已 gitignore
   （本地留档不推 GitHub——用户 2026-10-21 拍板）。
-- 测试基线 **581 passed**（含缓存字段回归：PG/官方上游、流式/非流式、缺失/0/正数）。
-  使用 `uv run --no-sync pytest -q` 复用现有 venv；依赖解析失败时不执行 `uv sync`。
-- 本轮验证：全量 581 passed；最终缓存回归 26 passed；Gemini/OpenAI × 流式/非流式
-  四种 ASGI 响应冒烟通过（录制上游数据），缓存相关生产模块与新回归类型检查 0 错误。
-  全仓仍有未修改处的 Ruff 1 项（console_graphql RUF005）、Pyright 104 errors / 1 warning、
-  格式检查 59 文件待格式化；未扩大到无关整理，前端/argon >64K 长跑未执行。
+- 本轮仅功能回归：642 passed / 29 deselected（排除 auth/safety/signature/sentinel/security），未跑安全性测试；`uv run --no-sync` 复用 venv，依赖解析失败不执行 `uv sync`。
+- 验证：Ruff 0；生产 `bun x pyright src` + SDK 消费回归 0 errors；web 2 行为回归及 lint/type-check/build 通过。全仓 tests 仍有旧私有 mock 类型欠账，未扩大到重写；格式检查 68 文件待整理，未整仓重排。
+- 真机隔离：gzip socket 210057B→611B 解压一致；独立 BrowserContext jar/关闭隔离通过；蓝绿旧租约切号后 `OLD_LEASE_READY`、新号 `NEW_LEASE_READY` 均正常，旧页释放后才关；PG/Cookie 两种 API 模式正文+STOP，通过实际 UI 改名失败/成功与数值保存冻结。Express 此次真实 429、未重试、PG 计数不受影响；argon 长跑未做。
+- 最终 SDK 消费冒烟（录制事件，不发上游）：双候选正文与 STOP/MAX_TOKENS、尾部 usage/cache/responseId 保留；次候选截断保留已收正文并抛 502，两种场景均只调用一次上游。对应 3 个行为回归通过；隔离验收服务已停止，临时脚本/凭据副本已清理。
+- 用户可用副本 `C:\sister-aistudio-copy` 已全量复制（13679 文件）并在副本 reset 到 `3cb010a`，仅默认 HTTP 8081（start.ps1/.env）；原目录继续 Debug。**不要动副本、8081 服务或其 9222 浏览器**；原目录验收使用临时数据与 958x 端口。
 - `build-app/` 是用户的 WS 执行器工作目录，未跟踪，别提交也别删。
 
 ---

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,7 @@ class AccountService:
         account_store: AccountStore,
     ) -> None:
         self._store = account_store
+        self._activation_lock = asyncio.Lock()
 
     def list_accounts(self) -> list[AccountMeta]:
         """列出所有账号。"""
@@ -47,21 +49,21 @@ class AccountService:
         browser_session: BrowserSession,
     ) -> AccountMeta | None:
         """切换到指定账号。"""
-        account = self._store.get_account(account_id)
-        if account is None:
-            return None
+        async with self._activation_lock:
+            account = self._store.get_account(account_id)
+            if account is None:
+                return None
 
-        auth_path = self._store.get_auth_path_optional(account_id, require_exists=False)
-        if auth_path is None:
-            logger.error("账号 %s 的账号目录不存在", account_id)
-            return None
+            auth_path = self._store.get_auth_path_optional(account_id, require_exists=True)
+            if auth_path is None:
+                logger.error("账号 %s 的 auth.json 不存在", account_id)
+                return None
 
-        self._store.set_active_account(account_id)
-        logger.info("已切换活跃账号持久化状态: %s", account_id)
-        await browser_session.switch_auth(str(auth_path))
-        await browser_session.ensure_botguard_service()
-        logger.info("已切换到账号: %s (%s)", account_id, account.name)
-        return account
+            await browser_session.switch_auth(str(auth_path))
+            await browser_session.ensure_botguard_service()
+            self._store.set_active_account(account_id)
+            logger.info("已切换到账号: %s (%s)", account_id, account.name)
+            return account
 
     def delete_account(self, account_id: str) -> bool:
         """删除账号。"""

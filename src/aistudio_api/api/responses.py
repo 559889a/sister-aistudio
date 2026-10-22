@@ -42,11 +42,13 @@ def to_gemini_usage_metadata(
     completion_tokens = _coerce_usage_int(usage.get("completion_tokens"))
     if completion_tokens == 0:
         completion_tokens = visible_tokens + reasoning_tokens
-    candidates_tokens = completion_tokens
+    candidates_tokens = visible_tokens if "visible_tokens" in completion_details else max(
+        0, completion_tokens - reasoning_tokens
+    )
     prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens"))
     total_tokens = _coerce_usage_int(usage.get("total_tokens"))
-    if total_tokens == 0 and (prompt_tokens or candidates_tokens):
-        total_tokens = prompt_tokens + candidates_tokens
+    if total_tokens == 0 and (prompt_tokens or completion_tokens):
+        total_tokens = prompt_tokens + completion_tokens
     cached = usage.get("cached_tokens")
     return GeminiUsageMetadata(
         promptTokenCount=prompt_tokens,
@@ -114,7 +116,9 @@ def to_gemini_parts(
     for function_response in function_responses or []:
         fr_name = str(function_response.get("name") or "unknown")
         resp_payload = GeminiFunctionResponsePayload(name=fr_name)
-        if "args" in function_response:
+        if "response" in function_response:
+            resp_payload.response = function_response["response"]
+        elif "args" in function_response:
             resp_payload.response = function_response["args"]
         elif "arguments" in function_response:
             resp_payload.response = function_response["arguments"]

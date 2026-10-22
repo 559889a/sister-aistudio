@@ -109,6 +109,65 @@ async def test_stream_roundtrip():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
+async def test_multiple_candidates_keep_separate_text_finish_and_usage(streaming):
+    output = ModelOutput(
+        candidates=[Candidate(text="first", finish_reason=1), Candidate(text="second", finish_reason=2)],
+        model="gemini-3.8-flash",
+    )
+    fake = FakeGateway(output=output, stream_events=[
+        ("body", "first"),
+        ("candidate_event", {"index": 1, "type": "body", "payload": "second"}),
+        ("finish_reason", 1),
+        ("candidate_event", {"index": 1, "type": "finish_reason", "payload": 2}),
+    ])
+    sdk = await _make_sdk(fake)
+    try:
+        if streaming:
+            chunks = [chunk async for chunk in await sdk.aio.models.generate_content_stream(model=output.model, contents="hi")]
+            texts: dict[int, str] = {}
+            for chunk in chunks:
+                assert chunk.usage_metadata is None
+                for candidate in chunk.candidates or []:
+                    assert candidate.index is not None and candidate.content is not None
+                    texts[candidate.index] = texts.get(candidate.index, "") + "".join(part.text or "" for part in candidate.content.parts or [])
+            assert texts == {0: "first", 1: "second"}
+            assert chunks[-1].candidates is not None
+            assert [candidate.finish_reason.value for candidate in chunks[-1].candidates if candidate.finish_reason] == ["STOP", "MAX_TOKENS"]
+        else:
+            response = await sdk.aio.models.generate_content(model=output.model, contents="hi")
+            assert response.usage_metadata is None and response.candidates is not None
+            texts = {}
+            for candidate in response.candidates:
+                assert candidate.index is not None and candidate.content is not None
+                texts[candidate.index] = "".join(part.text or "" for part in candidate.content.parts or [])
+            assert texts == {0: "first", 1: "second"}
+            assert [candidate.finish_reason.value for candidate in response.candidates if candidate.finish_reason] == ["STOP", "MAX_TOKENS"]
+    finally:
+        await sdk.aio.aclose()
+        sdk.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_secondary_finish_reports_truncated_stream():
+    from google.genai import errors
+
+    fake = FakeGateway(stream_events=[
+        ("body", "first"),
+        ("finish_reason", 1),
+        ("candidate_event", {"index": 1, "type": "body", "payload": "partial"}),
+    ])
+    sdk = await _make_sdk(fake)
+    try:
+        with pytest.raises(errors.APIError) as caught:
+            _ = [chunk async for chunk in await sdk.aio.models.generate_content_stream(model="gemini-3.8-flash", contents="hi")]
+        assert caught.value.code == 502
+    finally:
+        await sdk.aio.aclose()
+        sdk.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("upstream", ["pg", "official"])
 @pytest.mark.parametrize("cached_tokens", [None, 0, 2])
 async def test_cached_usage_survives_sdk_roundtrip(

@@ -22,9 +22,7 @@ export function useCookieGroups(accounts: Ref<AccountWithStats[]>, activeId: Ref
 
     for (let i = 0; i < rawAccounts.length; i++) {
       const acc = rawAccounts[i]
-      const cid =
-        acc.cookie_id ||
-        (acc.created_at ? `cookie_${acc.created_at.slice(0, 16)}` : 'cookie_default')
+      const cid = acc.cookie_id || `cookie_${acc.id}`
       if (!map[cid]) {
         map[cid] = []
         groupOrder.push(cid)

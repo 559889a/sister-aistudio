@@ -6,7 +6,11 @@ import json
 import re
 from collections.abc import Generator
 
-from aistudio_api.infrastructure.gateway.wire_parser import parse_response_chunk
+from aistudio_api.infrastructure.gateway.wire_parser import (
+    WIRE_RESPONSE_ID_INDEX,
+    parse_chunk_usage,
+    parse_response_chunk,
+)
 
 XSSI_PREFIX = ")]}'"
 
@@ -109,11 +113,10 @@ def _close_json_fragment(fragment: str) -> str | None:
 
 
 def _cut_at_last_top_level_comma(fragment: str) -> str:
-    """退回最近一个「最外层容器里」的逗号之前（丢掉截断的半个元素）。"""
+    """丢掉最深未闭合容器的半个元素，保留已收到的兄弟元素。"""
     in_string = False
     escape = False
-    depth = 0
-    last = -1
+    commas: list[int] = []
     for index, ch in enumerate(fragment):
         if in_string:
             if escape:
@@ -126,19 +129,23 @@ def _cut_at_last_top_level_comma(fragment: str) -> str:
         if ch == '"':
             in_string = True
         elif ch in "[{":
-            depth += 1
+            commas.append(-1)
         elif ch in "]}":
-            depth -= 1
-        elif ch == "," and depth == 1:
-            last = index
-    return fragment[:last] if last > 0 else ""
+            if commas:
+                commas.pop()
+        elif ch == "," and commas:
+            commas[-1] = index
+    for comma in reversed(commas):
+        if comma > 0:
+            return fragment[:comma]
+    return ""
 
 
 def _repair_truncated_json(fragment: str) -> object | None:
     """把截断的 JSON 片段补全成可解析对象；救不回来返回 None。
 
-    先按状态机补全；补出来的不是合法 JSON（例如断在 `tru` / `{"a":` 这种半个
-    token 上）就退回最后一个最外层逗号再试，最多几轮，能救多少救多少。
+    先补闭合符；断在半个 token 时，裁掉最深容器里不完整的元素再试，
+    保留同一候选中已经收到的正文、参数字段和元数据。
     """
     if not isinstance(fragment, str) or not fragment.strip():
         return None
@@ -265,11 +272,30 @@ class IncrementalJSONStreamParser:
         repaired = _repair_truncated_json(fragment)
         if not isinstance(repaired, list):
             return
-        candidate = parse_response_chunk(repaired)
-        if not candidate.has_content:
-            # 补出来的是空壳（只有括号/空 candidate），没有可交付的内容
+        if parse_chunk_usage(repaired):
+            yield repaired
             return
-        yield repaired
+        if (
+            len(repaired) > WIRE_RESPONSE_ID_INDEX
+            and isinstance(repaired[WIRE_RESPONSE_ID_INDEX], str)
+            and repaired[WIRE_RESPONSE_ID_INDEX]
+        ):
+            yield repaired
+            return
+        container = repaired[0] if repaired else None
+        for index in range(len(container) if isinstance(container, list) else 0):
+            candidate = parse_response_chunk(repaired, index)
+            if (
+                candidate.has_content
+                or candidate.thinking
+                or candidate.reasoning_images
+                or candidate.thought_signature
+                or candidate.finish_reason is not None
+                or candidate.finish_message
+                or candidate.safety_ratings
+            ):
+                yield repaired
+                return
 
 
 def classify_chunk(chunk: list) -> tuple[str, object]:

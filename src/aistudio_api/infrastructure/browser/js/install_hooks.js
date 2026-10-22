@@ -50,8 +50,6 @@
         // 2026-10-20 的构建里 `default_MakerSuite.TB` 已经不存在了，
         // 旧探针因此一次都没装上，binding 引导每次启动都白等 35 秒才回退 page_send。
         if (!dms || typeof dms.n !== 'function') return false;
-        if (window.__AISTUDIO__.serviceTapInstalled) return true;
-        window.__AISTUDIO__.serviceTapInstalled = true;
 
         const capture = (instance, via) => {
             const state = window.__AISTUDIO__;
@@ -100,6 +98,7 @@
                 wrapped.__aistudio_tap = true;
                 dms.n = wrapped;
             }
+            window.__AISTUDIO__.serviceTapInstalled = !!dms.n.__aistudio_tap;
         } catch (e) {}
 
         // 旧构建兼容：TB.prototype.initialize / getMetadata 上接 this
@@ -122,51 +121,6 @@
     // 每进一次页面（含 install 重试）都尝试装一次探针；已在则不重复
     installServiceTap();
 
-    const dms = window.default_MakerSuite;
-    if (!dms) return 'no_default_MakerSuite';
-
-    const isSnapCandidate = (fn) => {
-        if (typeof fn !== 'function') return false;
-        try {
-            const s = fn.toString();
-            return (s.includes('.snapshot(') || s.includes('snapshot({') || s.includes('.snapshot)')) &&
-                   (s.includes('content') || s.includes('e9b') || s.includes('Bcc') || s.includes('yield') || s.includes('Promise'));
-        } catch (e) {
-            return false;
-        }
-    };
-
-    // Auto-detect snapshot function via multi-variant feature matching
-    let snapKey = window.__AISTUDIO__.snapKey || null;
-    if (!snapKey) {
-        for (const k of Object.keys(dms)) {
-            try {
-                if (isSnapCandidate(dms[k])) {
-                    snapKey = k;
-                    break;
-                }
-            } catch(e) {}
-        }
-    }
-    if (!snapKey) return 'no_snapshot_fn';
-
-    // Hook snapshot function to capture service
-    if (!dms[snapKey].__api_hooked) {
-        const origSnap = dms[snapKey];
-        dms[snapKey] = function(...args) {
-            window.__AISTUDIO__.service = args[0];
-            const result = origSnap.apply(this, args);
-            if (result instanceof Promise) {
-                return result.then(s => {
-                    window.__AISTUDIO__.snapshot = s;
-                    return s;
-                });
-            }
-            window.__AISTUDIO__.snapshot = result;
-            return result;
-        };
-        dms[snapKey].__api_hooked = true;
-    }
 
     // Intercept prompt save requests and one-shot bootstrap GenerateContent in-page
     if (!window.__api_fetch_hooked && typeof window.fetch === 'function') {
@@ -320,7 +274,53 @@
         };
         window.__api_xhr_hooked = true;
     }
-    window.__AISTUDIO__.hooked = true;
+    const dms = window.default_MakerSuite;
+    if (!dms) return 'no_default_MakerSuite';
+
+    const isSnapCandidate = (fn) => {
+        if (typeof fn !== 'function') return false;
+        try {
+            const s = fn.toString();
+            return (s.includes('.snapshot(') || s.includes('snapshot({') || s.includes('.snapshot)')) &&
+                   (s.includes('content') || s.includes('e9b') || s.includes('Bcc') || s.includes('yield') || s.includes('Promise'));
+        } catch (e) {
+            return false;
+        }
+    };
+
+    // Auto-detect snapshot function via multi-variant feature matching
+    let snapKey = window.__AISTUDIO__.snapKey || null;
+    if (!snapKey) {
+        for (const k of Object.keys(dms)) {
+            try {
+                if (isSnapCandidate(dms[k])) {
+                    snapKey = k;
+                    break;
+                }
+            } catch(e) {}
+        }
+    }
+    if (!snapKey) return 'no_snapshot_fn';
+
+    // Hook snapshot function to capture service
+    if (!dms[snapKey].__api_hooked) {
+        const origSnap = dms[snapKey];
+        dms[snapKey] = function(...args) {
+            window.__AISTUDIO__.service = args[0];
+            const result = origSnap.apply(this, args);
+            if (result instanceof Promise) {
+                return result.then(s => {
+                    window.__AISTUDIO__.snapshot = s;
+                    return s;
+                });
+            }
+            window.__AISTUDIO__.snapshot = result;
+            return result;
+        };
+        dms[snapKey].__api_hooked = true;
+    }
     window.__AISTUDIO__.snapKey = snapKey;
+    if (!window.__AISTUDIO__.serviceTapInstalled) return 'no_service_tap';
+    window.__AISTUDIO__.hooked = true;
     return 'hooked:' + snapKey;
 })())
