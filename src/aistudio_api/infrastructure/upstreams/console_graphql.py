@@ -275,7 +275,15 @@ class ConsoleGraphqlClient:
         )
 
     def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0), proxy=self._proxy_url)
+        # 传输层带 gzip 上行（大请求体自动压，GFE 接受，2026-10-22 探针验收）
+        from aistudio_api.infrastructure.upstreams.gzip_transport import (
+            GzipUploadTransport,
+        )
+
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(600.0, connect=15.0),
+            transport=GzipUploadTransport(proxy=self._proxy_url),
+        )
 
     @staticmethod
     def _graphql_error(obj: dict) -> str:

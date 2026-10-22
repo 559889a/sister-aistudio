@@ -54,13 +54,15 @@ class VertexExpressClient:
         from google.genai import types
 
         http_options: dict[str, Any] = {}
-        if proxy_url:
-            # SDK 官方支持 async_client_args 透传 httpx 构造参数
-            import httpx
+        # SDK 官方支持 async_client_args 透传 httpx 构造参数；
+        # 传输层包 GzipUploadTransport：大请求体自动 gzip 上行（有代理走代理）
+        from aistudio_api.infrastructure.upstreams.gzip_transport import (
+            GzipUploadTransport,
+        )
 
-            http_options["async_client_args"] = {
-                "transport": httpx.AsyncHTTPTransport(proxy=proxy_url)
-            }
+        http_options["async_client_args"] = {
+            "transport": GzipUploadTransport(proxy=proxy_url)
+        }
         self._genai_types = types
         self._client = genai.Client(
             vertexai=True,

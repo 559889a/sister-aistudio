@@ -437,3 +437,20 @@ def test_channel_sentinels_full_context():
         assert contents2[0].parts[0].thought_signature == "REAL_SIG_9"
     finally:
         settings_module.runtime_settings.get = orig_get
+
+
+def test_registry_pick_handles_models_prefix_form():
+    """Gemini 原生端口的 models/express/... 形态：前缀必须命中（2026-10-22 修复）。"""
+    from aistudio_api.infrastructure.upstreams.registry import UpstreamRegistry
+
+    reg = UpstreamRegistry()
+    default_stub, express_stub = object(), object()
+    reg.register("aistudio", default_stub)
+    reg.register("vertex_express", express_stub)
+    assert reg.pick("models/express/gemini-4-argon") == (
+        express_stub, "gemini-4-argon", "vertex_express")
+    assert reg.pick("express/gemini-4-argon") == (
+        express_stub, "gemini-4-argon", "vertex_express")
+    # 无前缀走默认通道且原样返回（models/ 形态不剥）
+    assert reg.pick("models/gemini-3.8-flash") == (
+        default_stub, "models/gemini-3.8-flash", "aistudio")

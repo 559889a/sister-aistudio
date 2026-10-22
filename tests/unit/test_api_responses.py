@@ -29,6 +29,7 @@ def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
         "candidatesTokenCount": 316,
         "thoughtsTokenCount": 290,
         "totalTokenCount": 325,
+        "cachedTokenCount": None,
     }
 
 

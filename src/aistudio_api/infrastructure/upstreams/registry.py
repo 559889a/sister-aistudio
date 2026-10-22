@@ -104,12 +104,17 @@ class UpstreamRegistry:
         return self._clients.get(channel) if channel else None
 
     def pick(self, model: str) -> tuple[AIStudioClient | Any, str, str]:
-        """(client, 去前缀模型名, 通道名)。未知前缀原样当模型名走默认通道。"""
+        """(client, 去前缀模型名, 通道名)。未知前缀原样当模型名走默认通道。
+
+        兼容 Gemini 原生端口的 "models/express/..." 形态：前缀匹配前先剥
+        "models/"（2026-10-22 实证：不剥则前缀永不命中，express/ 静默掉回浏览器通道）。
+        """
+        work = model.removeprefix("models/")
         for prefix, channel in PREFIX_CHANNELS.items():
-            if model.startswith(prefix):
+            if work.startswith(prefix):
                 client = self._clients.get(channel)
                 if client is not None:
-                    return client, model[len(prefix):], channel
+                    return client, work[len(prefix):], channel
                 logger.warning("模型 %s 指向通道 %s，但该通道未配置凭据，回退默认通道", model, channel)
                 break
         default = self._clients.get(self.default_channel) or self._clients.get(DEFAULT_CHANNEL)
