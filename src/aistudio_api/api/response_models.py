@@ -13,7 +13,7 @@ class GeminiUsageMetadata(BaseModel):
     thoughtsTokenCount: int = 0
     totalTokenCount: int = 0
     # 命中的隐式/显式缓存 token 数（上游没报就不出现）——缓存测试观测面
-    cachedTokenCount: int | None = None
+    cachedContentTokenCount: int | None = None
 
 
 class GeminiFunctionCallPayload(BaseModel):

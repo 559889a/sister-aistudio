@@ -259,7 +259,7 @@ aistudio-api/
 
 | 通道 | 状态 | 关键事实 |
 |---|---|---|
-| pg/（浏览器+账号池） | ⚠️ 掉登录 | 浏览器会话被跳登录页（Session transition failed）；**需用户重新导入账号 cookie**（WebUI 账号页）。通道本身没坏 |
+| pg/（浏览器+账号池） | 已恢复 | 用户已换新 cookie；隔离浏览器实测 flash 约 3.3 万输入 token、连续两发均返回 `PG_READY` + `STOP`。两发均未报告缓存计数，不能把未报告当成 0；正式服务未启动 |
 | express/（Vertex Express 官方 key） | ✅ 主力 | flash 正常；argon 有配额窗口（429 间歇属正常，自然恢复，勿追打）。**long decode 已通**：客户端传 `max_tokens>65536` 即触发 SDK 自动接力（argon 独有，1M 总预算，务必流式） |
 | cookie/（console batchGraphql） | ❌ 服务端灰度 | 凭据没失效（核心令牌实证同会话）；调用已被放行但返回**空 candidates**。已拍板：不逆向、等灰度 |
 | build-proxy / build-agent（逆向完成） | 📦 待网关化 | ProxyStreamedCall 全配方已验证（见 `逆向相关内容/aistudio-proxy-rpc-re-2026-10-21.md` §3 recipe）；实现可参考 `C:\build2api\src\build-proxy-channel.js`。**等用户拍板再动工** |
@@ -269,7 +269,7 @@ aistudio-api/
 - 三通道四类 Harm 阈值**强制 OFF**（normalize 层单点 `chat_service._FORCED_SAFETY_OFF`，客户端 safetySettings 一律忽略——用户拍板，别改回透传）
 - `registry.pick` 修复：Gemini 原生端口 `models/express/...` 前缀此前**静默掉回浏览器通道**，已修
 - GzipUploadTransport：express/cookie 上行 gzip（>96KB 自动压；httpx 必须同时换 `_content` 和 `stream`，有单测防回归）
-- usage 链透传 `cachedContentTokenCount`（缓存观测面，`cachedTokenCount` 字段）
+- usage 缓存观测已修正：内部统一 `cached_tokens`；Gemini 使用官方 `cachedContentTokenCount`（原 `cachedTokenCount` 会被 SDK 拒绝/丢弃），OpenAI 使用 `prompt_tokens_details.cached_tokens`；Gemini 保留显式 0，未报告则省略
 - 代理自动探测补 7897（网络形态已从 TUN 切到系统代理，Clash 7897；git 全局 http.proxy 也指 7897）
 
 ### 6.3 用户目标与下一步路线图（按优先级）
@@ -277,10 +277,13 @@ aistudio-api/
 用户的两个优化目标：**①缩短大上下文途中时间（上传税）②缩短长上下文 prefill 的 TTFT**。
 用户认知：酒馆（SillyTavern）提示词管理前缀不稳，隐式缓存命中≈0——缓存要靠显式 cache。
 
-1. **express 显式缓存探针**：用 express key 试 `client.caches.create`（便宜，单发）。
-   能建 → 做网关化（cache 生命周期管理 + `cached_content` 引用注入）；不能建 → 缓存路线
-   对 express 关闭，写档结案。
-2. **pg 复活**：等用户重导账号 cookie 后，补 pg 通道缓存观测（看 usage 有无 cached 字段）。
+1. **express 显式缓存已结案（当前 Key 不支持）**：`client.aio.caches.create` 默认
+   `POST /v1beta1/cachedContents` 返回 404；补齐项目/global 路径后返回 **401
+   UNAUTHENTICATED**，明确「API keys are not supported by this API，Expected OAuth2
+   access token」。两种地址各单发、关闭 SDK 重试、未创建任何缓存；不实现生命周期或引用注入。
+2. **pg 已恢复，缓存观测已完成**：沿用实际运行期 bypass/low 设置，隔离 profile 与凭据
+   副本连发两次约 3.3 万 token 的相同上下文，均 `PG_READY` + `STOP`；`cached_tokens`
+   都为 null（上游未报告），本次无缓存命中证据。正式 data/账号/设置未改，临时浏览器已关闭。
 3. **429 缓解假设验证**（用户理论：谷歌疑 IP+RPM 双风控，缓存生效则 429 应好转）——
    缓存落地后观察对比。
 4. **pg 页面内 gzip**：大上下文在 pg 也有 ~16s/MB 上传税；页面 XHR 发 gzip 需验证
@@ -299,8 +302,12 @@ aistudio-api/
 - long decode / gzip 等特殊处理**只做 express**，pg/cookie 不动（用户拍板）。
 - `.env`/`data/` 永不入库；`逆向相关内容/`、`docs/`、`README_EN.md`、`image/` 已 gitignore
   （本地留档不推 GitHub——用户 2026-10-21 拍板）。
-- 测试基线 **569 passed**（`.venv/Scripts/python -m pytest`；uv sync 会因依赖解析失败，
-  直接用 venv 跑）。
+- 测试基线 **581 passed**（含缓存字段回归：PG/官方上游、流式/非流式、缺失/0/正数）。
+  使用 `uv run --no-sync pytest -q` 复用现有 venv；依赖解析失败时不执行 `uv sync`。
+- 本轮验证：全量 581 passed；最终缓存回归 26 passed；Gemini/OpenAI × 流式/非流式
+  四种 ASGI 响应冒烟通过（录制上游数据），缓存相关生产模块与新回归类型检查 0 错误。
+  全仓仍有未修改处的 Ruff 1 项（console_graphql RUF005）、Pyright 104 errors / 1 warning、
+  格式检查 59 文件待格式化；未扩大到无关整理，前端/argon >64K 长跑未执行。
 - `build-app/` 是用户的 WS 执行器工作目录，未跟踪，别提交也别删。
 
 ---

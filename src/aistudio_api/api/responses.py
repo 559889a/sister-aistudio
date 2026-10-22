@@ -47,13 +47,15 @@ def to_gemini_usage_metadata(
     total_tokens = _coerce_usage_int(usage.get("total_tokens"))
     if total_tokens == 0 and (prompt_tokens or candidates_tokens):
         total_tokens = prompt_tokens + candidates_tokens
-    cached = _coerce_usage_int(usage.get("cached_token_count"))
+    cached = usage.get("cached_tokens")
     return GeminiUsageMetadata(
         promptTokenCount=prompt_tokens,
         candidatesTokenCount=candidates_tokens,
         thoughtsTokenCount=reasoning_tokens,
         totalTokenCount=total_tokens,
-        cachedTokenCount=cached or None,
+        cachedContentTokenCount=_coerce_usage_int(cached)
+        if cached is not None
+        else None,
     )
 
 

@@ -34,6 +34,7 @@ Google AI Studio 反向代理网关：一台受控 Chromium（CDP 直连，无 N
 | **运行期设置（WebUI 可改）** | 参数覆写（思考控制 / 档位 / 采样参数 / max_tokens）、预填充兼容（含思维链闭合守卫）、bypass 开关，落在 `data/settings.json`，改完立即生效、无需重启 |
 | **上行 gzip** | express/cookie 通道 >96KB 请求体自动 gzip（`Content-Encoding` 传输层压缩，服务端解压后逐字节一致；与 Google 前端自身行为一致）。大上下文上传时间约降 10-15× |
 | **Express 长输出（long decode）** | express/ 通道设 `max_tokens > 65536` 即触发（仅 gemini-4-argon）：SDK 自动按 64K 接力直到 1M 总预算（输入+思考+输出共享窗口），接力令牌端侧加密、服务端零存储；小时级运行，建议配 SSE 流式（1s 心跳保活）。双端口（OAI `max_tokens` / Gemini `maxOutputTokens`）原生透传 |
+| **缓存用量透传** | 上游报告的缓存 token 数保留到双协议响应：Gemini `usageMetadata.cachedContentTokenCount` / OpenAI `usage.prompt_tokens_details.cached_tokens`；上游未报告时不伪造命中 |
 | **安全过滤强制全关** | 三条通道（pg / express / cookie）四类 Harm 阈值一律注入 `OFF`，客户端传的 `safetySettings` 一律忽略；cookie 通道另对 JAILBREAK 类兜底 `OFF`。注：输入侧预审（生成前拒答）是服务端独立硬过滤，阈值关不掉 |
 | **下游参数容错** | 自动丢弃下游传入的不兼容工具与非标准参数，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
@@ -112,6 +113,7 @@ $env:AISTUDIO_BROWSER_HEADLESS='false'; .\start.ps1      # 有头浏览器（调
 - `/v1/models` 走本地模型表 `data/models.json`（带前缀别名的模型清单）；裸模型名不出现在列表里但**仍可调用**（走默认通道）。
 - `AISTUDIO_UPSTREAM=vertex_express|console_graphql` 可把**默认通道**切到无浏览器上游（`pg/` 前缀仍强制走浏览器）。
 - `express/` 锁 `locations/global`：无位置入口会被 Google 路由到项目默认区（实测 `asia-southeast1`），新模型只在 global 发布，表现为「模型名写错」式的 404；钉 global 需配合 `GOOGLE_PROJECT_ID` 项目号。
+- `express/` 官方 Key **不支持显式缓存创建**：项目级 `cachedContents` 接口实测返回 `401 UNAUTHENTICATED`，明确要求 OAuth2、拒绝 API key（2026-10-22）。本通道不创建显式缓存；隐式缓存是否命中以响应 usage 为准。
 
 ---
 
@@ -283,7 +285,7 @@ Python 侧：
 
 ```bash
 uv run ruff check .               # Lint
-uv run pytest                     # 单元测试（基线 569 passed / 0 failed）
+uv run pytest                     # 单元测试（基线 581 passed / 0 failed）
 ```
 
 > 开发规范与交接状态见 [AGENTS.md](./AGENTS.md)。改完代码需重启 `start.ps1` 才生效。

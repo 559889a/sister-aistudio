@@ -202,7 +202,7 @@ def usage_to_ours(usage: dict | None) -> dict[str, object]:
         out["thoughts_token_count"] = int(thought or 0)
     cached = usage.get("cachedContentTokenCount")
     if cached is not None:
-        out["cached_token_count"] = int(cached or 0)
+        out["cached_tokens"] = int(cached or 0)
     return out
 
 

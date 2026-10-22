@@ -108,6 +108,70 @@ async def test_stream_roundtrip():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("upstream", ["pg", "official"])
+@pytest.mark.parametrize("cached_tokens", [None, 0, 2])
+async def test_cached_usage_survives_sdk_roundtrip(
+    streaming: bool, upstream: str, cached_tokens: int | None
+):
+    from aistudio_api.application.openai_bridge import to_openai_response
+    from aistudio_api.infrastructure.gateway.wire_parser import parse_usage_metadata
+    from aistudio_api.infrastructure.upstreams.common import usage_to_ours
+
+    output = _output()
+    if upstream == "pg":
+        output.usage = parse_usage_metadata([3, 4, 7, cached_tokens])
+    else:
+        output.usage = usage_to_ours(
+            {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 4,
+                "totalTokenCount": 7,
+                "cachedContentTokenCount": cached_tokens,
+            }
+        )
+    fake = FakeGateway(
+        output=output,
+        stream_events=[
+            ("body", output.text),
+            ("finish_reason", 1),
+            ("usage", output.usage),
+        ],
+    )
+    sdk = await _make_sdk(fake)
+    try:
+        if streaming:
+            responses = [
+                chunk
+                async for chunk in await sdk.aio.models.generate_content_stream(
+                    model=output.model, contents="hi"
+                )
+            ]
+            response = responses[-1]
+        else:
+            response = await sdk.aio.models.generate_content(
+                model=output.model, contents="hi"
+            )
+        assert response.usage_metadata is not None
+        assert response.usage_metadata.cached_content_token_count == cached_tokens
+        dumped_usage = response.usage_metadata.model_dump(
+            by_alias=True, exclude_none=True
+        )
+        assert ("cachedContentTokenCount" in dumped_usage) == (cached_tokens is not None)
+        usage = to_openai_response(
+            output, model=output.model, request_id="cache"
+        )["usage"]
+        assert isinstance(usage, dict)
+        if cached_tokens:
+            assert usage["prompt_tokens_details"] == {"cached_tokens": cached_tokens}
+        else:
+            assert "prompt_tokens_details" not in usage
+    finally:
+        await sdk.aio.aclose()
+        sdk.close()
+
+
+@pytest.mark.asyncio
 async def test_error_maps_to_api_error():
     fake = FakeGateway(error=UsageLimitExceeded("配额用完: daily quota"))
     sdk = await _make_sdk(fake)
