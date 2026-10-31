@@ -303,13 +303,16 @@ async def handle_attempt_exception(
         logger.warning(
             "%s账号 403 权限拒绝%s: %s", _rid(), _fmt_elapsed(attempt_elapsed_s), exc
         )
-        # 403/401 不是配额问题（2026-10-19 拍板）：不换号、不加账号冷却，按浏览器故障重启
+        # 403 不是配额问题（2026-10-19 拍板）：不换号、不加账号冷却。
+        # 2026-10-31 起不再重启浏览器：incidents.jsonl 26/26 例 403[7] 全为 argon、
+        # 页面健康（page_state 正常）、无网络层失败、86.8% 同期成功率——是服务端
+        # argon 门控间歇翻牌，不是浏览器故障；重启反而制造冷会话连环 403（实测
+        # 20:48×2 连发）+ 单浏览器在途流全断。保留证据采集，快速 403 交客户端重发。
         record_account("error")
         await _capture_failure_evidence(
             exc, client=client, http_status=403, error_type="auth_error",
             model=target_model, attempt_elapsed_s=attempt_elapsed_s,
         )
-        await _restart_browser()
         raise HTTPException(
             403, detail={"message": str(exc), "type": "auth_error"}
         ) from exc
