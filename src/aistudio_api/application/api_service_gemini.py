@@ -251,7 +251,7 @@ async def handle_attempt_exception(
 
     - 403/401、页面传输失败、会话挂死、登录页重定向 → 杀掉浏览器进程（下次请求
       ``ensure_ready`` 重建）救**后续**请求；403 不加账号冷却、不换号。
-    - 429 只记账（429 计数 +1，第 5 次冷却到美西午夜），不重启浏览器。
+    - 429 只记账（429 计数 +1，第 5 次冷却到北京时间 15:00），不重启浏览器。
     - 登录态失效（SessionExpiredError）凭据已死，按账号隔离 24h 并重启浏览器。
     """
     target_model = normalized_model or model_path

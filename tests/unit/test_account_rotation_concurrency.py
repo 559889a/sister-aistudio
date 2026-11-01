@@ -15,7 +15,6 @@ from aistudio_api.application.account_orchestrator import (
 from aistudio_api.application.account_rotator import (
     AccountRotator,
     AccountStats,
-    get_seconds_until_pacific_midnight,
 )
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
 from aistudio_api.infrastructure.gateway.capture import (
@@ -129,8 +128,8 @@ async def test_account_stats_per_model_cooldown():
 
 
 @pytest.mark.asyncio
-async def test_account_stats_pacific_midnight_reset():
-    """测试美西跨天日限额自动恢复。"""
+async def test_account_stats_quota_day_reset():
+    """测试配额跨天（北京时间 15:00）日限额自动恢复。"""
     stats = AccountStats(account_id="acc_1")
     stats.model_cooldowns["gemini-2.5-pro"] = time.time() + 3600
     stats.model_rate_limited_dates["gemini-2.5-pro"] = "2020-01-01"  # 过去的日期
@@ -274,12 +273,6 @@ async def test_try_switch_account_avalanche_protection():
         assert all(results)
         # 只应该发生 1 次实质性的 activate_account 调用
         assert activate_count == 1
-
-
-def test_get_seconds_until_pacific_midnight():
-    """测试距离美西 0 点剩余秒数计算。"""
-    remaining = get_seconds_until_pacific_midnight()
-    assert 0 <= remaining <= 86400
 
 
 @pytest.mark.asyncio
@@ -493,8 +486,8 @@ async def test_rotator_prioritizes_least_used_account():
 
 
 @pytest.mark.asyncio
-async def test_model_requests_midnight_reset():
-    """测试美西午夜跨天后，模型的单日请求计数与限流锁定自动归零刷新。"""
+async def test_model_requests_quota_day_reset():
+    """测试配额跨天（北京时间 15:00）后，模型的单日请求计数与限流锁定自动归零刷新。"""
     stats = AccountStats(account_id="acc_1")
     stats.model_requests["gemini-3.8-flash"] = 50
     stats.model_requests_dates["gemini-3.8-flash"] = "2020-01-01"  # 过去的日期

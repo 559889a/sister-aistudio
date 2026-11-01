@@ -289,7 +289,7 @@ def test_hook_headers_install_before_bundle_and_service_tap_can_retry():
     code += f"const install = () => ({INSTALL_HOOKS_JS});\n"
     code += """
         assert(install() === 'no_default_MakerSuite');
-        fetch('/$rpc/read', { headers: { 'X-Goog-Api-Key': 'page-key' } });
+        fetch('/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels', { headers: { 'X-Goog-Api-Key': 'page-key' } });
         assert(__AISTUDIO__.rpcHeaders['x-goog-api-key'] === 'page-key');
         const service = { A: { snapshot() {} } };
         const bundle = {
@@ -305,4 +305,51 @@ def test_hook_headers_install_before_bundle_and_service_tap_can_retry():
         assert(__AISTUDIO__.captureVia === 'inject(shape)');
     """
     result = subprocess.run([runtime, "-e", code], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("transport", ["fetch", "xhr"])
+def test_rpc_headers_are_isolated_from_waa_requests(transport: str) -> None:
+    runtime = shutil.which("bun") or shutil.which("node")
+    if not runtime:
+        pytest.skip("No JavaScript runtime installed")
+    code = """
+        const assert = require('node:assert/strict');
+        globalThis.window = globalThis;
+        globalThis.fetch = () => Promise.resolve();
+        class XHR {
+            open() {}
+            setRequestHeader() {}
+            send() {}
+        }
+        globalThis.XMLHttpRequest = XHR;
+    """
+    code += f"({INSTALL_HOOKS_JS});\nconst transport = {json.dumps(transport)};\n"
+    code += """
+        const send = (url, headers) => {
+            if (transport === 'fetch') {
+                fetch(url, { headers });
+            } else {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', url);
+                for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+                xhr.send('[]');
+            }
+        };
+        const waa = 'https://waa-pa.clients6.google.com/$rpc/google.internal.waa.v1.Waa/Ping';
+        const maker = 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/';
+        send(waa, { 'X-Goog-Api-Key': 'waa-key' });
+        assert.equal(__AISTUDIO__.rpcHeaders, undefined);
+        send(maker + 'ListModels', { 'X-Goog-Api-Key': 'maker-key', 'X-AIStudio-Visit-Id': 'visit' });
+        send(waa, { 'X-Goog-Api-Key': 'waa-key', 'Content-Encoding': 'gzip' });
+        assert.equal(__AISTUDIO__.rpcHeaders['x-goog-api-key'], 'maker-key');
+        assert.equal(__AISTUDIO__.rpcHeaders['content-encoding'], undefined);
+        send(maker + 'GetAiStudioBenefitTier', { 'X-Goog-Api-Key': 'new-maker-key', 'X-AIStudio-G1-Tier': 'TIER1' });
+        assert.equal(__AISTUDIO__.rpcHeaders['x-goog-api-key'], 'new-maker-key');
+        assert.equal(__AISTUDIO__.rpcHeaders['x-aistudio-visit-id'], 'visit');
+        assert.equal(__AISTUDIO__.rpcHeaders['x-aistudio-g1-tier'], 'TIER1');
+    """
+    result = subprocess.run(
+        [runtime, "-e", code], capture_output=True, text=True, encoding="utf-8"
+    )
     assert result.returncode == 0, result.stderr

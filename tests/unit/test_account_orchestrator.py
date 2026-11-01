@@ -170,7 +170,7 @@ def test_account_stats_cooldown_only_after_fifth_rate_limit():
         stats.record_rate_limited(model="gemini-2.5-flash")
         assert stats.is_available("gemini-2.5-flash")
 
-    # 第 5 次：打入冷宫，冷却到美西午夜
+    # 第 5 次：打入冷宫，冷却到北京时间 15:00
     stats.record_rate_limited(model="gemini-2.5-flash")
     assert not stats.is_available("gemini-2.5-flash")
     assert stats.get_cooldown_remaining("gemini-2.5-flash") > 60.0

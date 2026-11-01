@@ -13,7 +13,7 @@
     // 拿在手里，**不需要用户在页面上发任何一条消息**。
     //   - 服务：Angular DI 造出来的 BotGuardService 单例，从 inject(TB) 与
     //     TB.prototype.initialize / getMetadata 接住 this；
-    //   - 头：页面自己的 `/$rpc/` 请求带的那套（x-goog-api-key / x-aistudio-*），
+    //   - 头：页面自己的 MakerSuite RPC 请求带的那套（x-goog-api-key / x-aistudio-*），
     //     合并保留，缺 x-goog-ext-* 也没关系（读类 RPC 同样带会话级头）。
 
     const denyHeader = (name) => /^(content-length|host|connection)$/i.test(String(name));
@@ -42,7 +42,8 @@
         } catch (e) {}
     };
 
-    const isRpcUrl = (url) => String(url || '').includes('/$rpc/');
+    // WAA 握手使用另一套 API key，不能合并到 MakerSuite 的请求模板。
+    const isMakerSuiteRpcUrl = (url) => String(url || '').includes('/$rpc/google.internal.alkali.applications.makersuite.');
 
     const installServiceTap = () => {
         const dms = window.default_MakerSuite;
@@ -130,7 +131,7 @@
                 const req = args[0];
                 const init = args[1] || {};
                 const url = typeof req === 'string' ? req : (req && req.url ? req.url : '');
-                if (isRpcUrl(url)) {
+                if (isMakerSuiteRpcUrl(url)) {
                     recordHeaders(init.headers || (req && req.headers));
                 }
                 if (url.includes('SavePrompt') || url.includes('CreatePrompt')) {
@@ -208,7 +209,7 @@
         proto.send = function(body) {
             try {
                 const url = this.__aistudio_url || '';
-                if (isRpcUrl(url)) {
+                if (isMakerSuiteRpcUrl(url)) {
                     recordHeaders(this.__aistudio_headers);
                 }
                 if (url.includes('SavePrompt') || url.includes('CreatePrompt')) {

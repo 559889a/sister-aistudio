@@ -7,9 +7,8 @@ import contextlib
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
 from aistudio_api.config import resolve_rotator_state_file, settings
 from aistudio_api.infrastructure.utils.common import atomic_write_json
@@ -24,39 +23,29 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("rotator")
 
 # 用户拍板（2026-10-20）：避免误杀——单账号/模型要累计第 5 次 429 才打入冷宫
-# （冷却到美西午夜配额重置）；前 4 次只计数不冷却，网关不因此换号。
+# （冷却到北京时间 15:00 配额刷新）；前 4 次只计数不冷却，网关不因此换号。
 RATE_LIMITED_COOLDOWN_THRESHOLD = 5
 
-
-def get_pacific_date_key(ts: float | None = None) -> str:
-    """获取美西太平洋时间（America/Los_Angeles）日期键值 YYYY-MM-DD。"""
-    try:
-        tz = ZoneInfo("America/Los_Angeles")
-        dt = datetime.fromtimestamp(time.time() if ts is None else ts, tz=tz)
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        current_ts = time.time() if ts is None else ts
-        dt = datetime.fromtimestamp(current_ts - 28800, tz=UTC)
-        return dt.strftime("%Y-%m-%d")
+# 用户拍板（2026-11-01）：配额刷新边界从美西太平洋午夜改为**北京时间 15:00**。
+# 北京无夏令时，固定 UTC+8 偏移即可精确表达，边界不再随夏令时漂移
+# （夏令时期间太平洋午夜正好落在北京时间 15:00，冬令时则相差 1 小时）。
+QUOTA_RESET_HOUR = 15
+QUOTA_TZ = timezone(timedelta(hours=8))
 
 
-def get_seconds_until_pacific_midnight() -> float:
-    """获取距离下一次美西太平洋时间午夜 00:00 的秒数。"""
-    try:
-        tz = ZoneInfo("America/Los_Angeles")
-        now_dt = datetime.now(tz)
-        tomorrow_dt = (now_dt + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        return max(0.0, tomorrow_dt.timestamp() - now_dt.timestamp())
-    except Exception:
-        # 保底计算
-        now = time.time()
-        pacific_offset = -28800  # UTC-8
-        now_pacific = now + pacific_offset
-        seconds_in_day = 86400
-        remaining = seconds_in_day - (int(now_pacific) % seconds_in_day)
-        return float(remaining)
+def get_quota_date_key(ts: float | None = None) -> str:
+    """获取当前配额日的日期键值 YYYY-MM-DD（北京时间 15:00 跨天）。"""
+    moment = datetime.fromtimestamp(time.time() if ts is None else ts, tz=QUOTA_TZ)
+    return (moment - timedelta(hours=QUOTA_RESET_HOUR)).strftime("%Y-%m-%d")
+
+
+def get_seconds_until_quota_reset() -> float:
+    """获取距离下一次北京时间 15:00 配额刷新的秒数。"""
+    now = datetime.now(QUOTA_TZ)
+    next_reset = now.replace(hour=QUOTA_RESET_HOUR, minute=0, second=0, microsecond=0)
+    if next_reset <= now:
+        next_reset += timedelta(days=1)
+    return max(0.0, (next_reset - now).total_seconds())
 
 
 def normalize_model_key(model: str | None) -> str | None:
@@ -83,7 +72,7 @@ class AccountStats:
     auth_cooldown: float = 0.0
     session_expired: bool = False
     last_session_expired: float = 0.0
-    rate_limited_date_la: str | None = None
+    rate_limited_date: str | None = None
     model_cooldowns: dict[str, float] = field(default_factory=dict)
     model_rate_limited_dates: dict[str, str] = field(default_factory=dict)
     model_requests: dict[str, int] = field(default_factory=dict)
@@ -105,7 +94,7 @@ class AccountStats:
             "auth_cooldown": self.auth_cooldown,
             "session_expired": self.session_expired,
             "last_session_expired": self.last_session_expired,
-            "rate_limited_date_la": self.rate_limited_date_la,
+            "rate_limited_date": self.rate_limited_date,
             "model_cooldowns": dict(self.model_cooldowns),
             "model_rate_limited_dates": dict(self.model_rate_limited_dates),
             "model_requests": dict(self.model_requests),
@@ -174,8 +163,8 @@ class AccountStats:
             auth_cooldown=_as_float(data.get("auth_cooldown")),
             session_expired=bool(data.get("session_expired")),
             last_session_expired=_as_float(data.get("last_session_expired")),
-            rate_limited_date_la=str(data["rate_limited_date_la"])
-            if data.get("rate_limited_date_la")
+            rate_limited_date=str(data["rate_limited_date"])
+            if data.get("rate_limited_date")
             else None,
             model_cooldowns=model_cooldowns,
             model_rate_limited_dates=model_rate_limited_dates,
@@ -184,15 +173,15 @@ class AccountStats:
             model_rate_limited=model_rate_limited,
         )
 
-    def _check_date_reset(self, model: str | None, current_la: str) -> None:
-        """检查美西午夜跨天，自动重置单日请求计数与限流锁定。"""
+    def _check_date_reset(self, model: str | None, current_quota_date: str) -> None:
+        """检查配额日跨天（北京时间 15:00），自动重置单日请求计数与限流锁定。"""
         model = normalize_model_key(model)
-        if self.rate_limited_date_la and self.rate_limited_date_la < current_la:
-            self.rate_limited_date_la = None
+        if self.rate_limited_date and self.rate_limited_date < current_quota_date:
+            self.rate_limited_date = None
             self.global_rate_limited_streak = 0
         if (
             self.last_rate_limited
-            and get_pacific_date_key(self.last_rate_limited) < current_la
+            and get_quota_date_key(self.last_rate_limited) < current_quota_date
         ):
             self.global_rate_limited_streak = 0
 
@@ -202,12 +191,12 @@ class AccountStats:
         )
         for key in models:
             req_date = self.model_requests_dates.get(key)
-            if req_date and req_date < current_la:
+            if req_date and req_date < current_quota_date:
                 self.model_requests[key] = 0
-                self.model_requests_dates[key] = current_la
+                self.model_requests_dates[key] = current_quota_date
 
             limit_date = self.model_rate_limited_dates.get(key)
-            if limit_date and limit_date < current_la:
+            if limit_date and limit_date < current_quota_date:
                 self.model_rate_limited_dates.pop(key, None)
                 self.model_cooldowns.pop(key, None)
                 self.model_rate_limited.pop(key, None)
@@ -215,7 +204,7 @@ class AccountStats:
     def is_available(
         self, model: str | None = None, *, ignore_auth_cooldown: bool = False
     ) -> bool:
-        """检查账号在指定模型下是否可用（美西 0 点自动刷新）。"""
+        """检查账号在指定模型下是否可用（北京时间 15:00 自动刷新）。"""
         now = time.time()
         if self.session_expired:
             if self.auth_cooldown > now:
@@ -224,11 +213,11 @@ class AccountStats:
         if not ignore_auth_cooldown and self.auth_cooldown > now:
             return False
         model = normalize_model_key(model)
-        current_la = get_pacific_date_key(now)
-        self._check_date_reset(model, current_la)
+        current_quota_date = get_quota_date_key(now)
+        self._check_date_reset(model, current_quota_date)
 
         # 检查全局 429 标记
-        if self.rate_limited_date_la:
+        if self.rate_limited_date:
             return False
 
         if model:
@@ -249,7 +238,7 @@ class AccountStats:
             cd = self.model_cooldowns.get(model, 0.0)
             if cd > now:
                 return max(0.0, cd - now)
-        return get_seconds_until_pacific_midnight()
+        return get_seconds_until_quota_reset()
 
     def record_success(self, model: str | None = None) -> None:
         now = time.time()
@@ -259,45 +248,45 @@ class AccountStats:
         self.auth_errors = 0
         self.auth_cooldown = 0.0
         model = normalize_model_key(model)
-        self._check_date_reset(model, get_pacific_date_key(now))
+        self._check_date_reset(model, get_quota_date_key(now))
         self.global_rate_limited_streak = 0
-        self.rate_limited_date_la = None
+        self.rate_limited_date = None
         if model:
-            la_date = get_pacific_date_key(now)
+            quota_date = get_quota_date_key(now)
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = la_date
+            self.model_requests_dates[model] = quota_date
             self.model_cooldowns.pop(model, None)
             self.model_rate_limited_dates.pop(model, None)
             # 成功一次就清零该模型的 429 计数（防误杀：抖动性 429 不累积进冷宫）
             self.model_rate_limited.pop(model, None)
 
     def record_rate_limited(self, model: str | None = None) -> None:
-        """记一次 429：只计数；第 5 次（含）起才冷却到美西午夜（打入冷宫）。
+        """记一次 429：只计数；第 5 次（含）起才冷却到北京时间 15:00（打入冷宫）。
 
         用户拍板（2026-10-20）：前 4 次不冷却——网关不因此换号（防误杀）；
-        第 5 次把该账号/模型打入冷宫，直到美西午夜配额重置。
+        第 5 次把该账号/模型打入冷宫，直到北京时间 15:00 配额刷新。
         """
         now = time.time()
         self.requests += 1
         self.rate_limited += 1
-        self._check_date_reset(model, get_pacific_date_key(now))
+        self._check_date_reset(model, get_quota_date_key(now))
         self.last_rate_limited = now
         self.last_used = now
-        la_date = get_pacific_date_key(now)
+        quota_date = get_quota_date_key(now)
         model = normalize_model_key(model)
 
         if model:
             limit_count = self.model_rate_limited.get(model, 0) + 1
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = la_date
+            self.model_requests_dates[model] = quota_date
             self.model_rate_limited[model] = limit_count
-            self.model_rate_limited_dates[model] = la_date
+            self.model_rate_limited_dates[model] = quota_date
             if limit_count >= RATE_LIMITED_COOLDOWN_THRESHOLD:
-                self.model_cooldowns[model] = now + get_seconds_until_pacific_midnight()
+                self.model_cooldowns[model] = now + get_seconds_until_quota_reset()
         else:
             self.global_rate_limited_streak += 1
             if self.global_rate_limited_streak >= RATE_LIMITED_COOLDOWN_THRESHOLD:
-                self.rate_limited_date_la = la_date
+                self.rate_limited_date = quota_date
 
     def record_error(self, model: str | None = None) -> None:
         self.requests += 1
@@ -305,10 +294,10 @@ class AccountStats:
         now = time.time()
         self.last_used = now
         model = normalize_model_key(model)
-        self._check_date_reset(model, get_pacific_date_key(now))
+        self._check_date_reset(model, get_quota_date_key(now))
         if model:
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = get_pacific_date_key(now)
+            self.model_requests_dates[model] = get_quota_date_key(now)
 
     def record_session_expired(self, model: str | None = None) -> None:
         """记录账号登录态失效，隔离 24 小时或直至用户重置/重新导入。"""
@@ -323,10 +312,10 @@ class AccountStats:
         # 隔离 24 小时或直至用户重新导入/手动重置
         self.auth_cooldown = now + 86400.0
         model = normalize_model_key(model)
-        self._check_date_reset(model, get_pacific_date_key(now))
+        self._check_date_reset(model, get_quota_date_key(now))
         if model:
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = get_pacific_date_key(now)
+            self.model_requests_dates[model] = get_quota_date_key(now)
 
     def clear_cooldown(self, model: str | None = None) -> None:
         """手动清除冷却与 429/403/失效锁定。"""
@@ -340,7 +329,7 @@ class AccountStats:
             self.model_rate_limited_dates.pop(model, None)
             self.model_rate_limited.pop(model, None)
         else:
-            self.rate_limited_date_la = None
+            self.rate_limited_date = None
             self.global_rate_limited_streak = 0
             self.model_cooldowns.clear()
             self.model_rate_limited_dates.clear()
@@ -426,10 +415,10 @@ class AccountRotator:
     def get_all_stats(self) -> dict[str, dict[str, object]]:
         """获取所有账号的运行与配额状态。"""
         result: dict[str, dict[str, object]] = {}
-        current_la = get_pacific_date_key()
+        current_quota_date = get_quota_date_key()
         for account in self._store.list_accounts():
             stats = self._stats.get(account.id, AccountStats(account_id=account.id))
-            stats._check_date_reset(None, current_la)
+            stats._check_date_reset(None, current_quota_date)
             result[account.id] = {
                 "name": account.name,
                 "email": account.email,
@@ -462,7 +451,7 @@ class AccountRotator:
                         | {
                             k
                             for k, dt in stats.model_rate_limited_dates.items()
-                            if dt == current_la
+                            if dt == current_quota_date
                         }
                     )
                     if not stats.is_available(m)

@@ -196,7 +196,7 @@ def test_deleted_request_account_is_not_charged_to_new_active(service, monkeypat
 
 
 def test_midnight_snapshot_resets_idle_models_and_errors(service, monkeypatch):
-    now = [datetime(2026, 10, 21, 23, 59, tzinfo=ZoneInfo("America/Los_Angeles")).timestamp()]
+    now = [datetime(2026, 10, 21, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()]
     monkeypatch.setattr(account_rotator.time, "time", lambda: now[0])
     account = save(service)
     rotator = AccountRotator(service._store)
@@ -224,7 +224,7 @@ def test_clearing_cooldown_keeps_daily_usage():
 
 
 def test_global_429_streak_is_separate_from_lifetime_stats(monkeypatch):
-    now = [datetime(2026, 10, 21, 23, 59, tzinfo=ZoneInfo("America/Los_Angeles")).timestamp()]
+    now = [datetime(2026, 10, 21, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()]
     monkeypatch.setattr(account_rotator.time, "time", lambda: now[0])
     stats = AccountStats(account_id="account")
     for _ in range(4):
@@ -241,15 +241,22 @@ def test_global_429_streak_is_separate_from_lifetime_stats(monkeypatch):
     assert stats.is_available()
 
 
-@pytest.mark.parametrize("month,day,hour,expected", [(3, 8, 1, 22 * 3600), (11, 1, 0, 25 * 3600)])
-def test_midnight_uses_elapsed_time_across_dst(monkeypatch, month, day, hour, expected):
+@pytest.mark.parametrize(
+    "hour,minute,expected",
+    [(14, 0, 3600.0), (15, 0, 86400.0), (16, 30, 22.5 * 3600)],
+)
+def test_seconds_until_quota_reset_uses_beijing_1500(
+    monkeypatch, hour: int, minute: int, expected: float
+) -> None:
+    """配额刷新边界固定为北京时间 15:00，不随夏令时漂移。"""
+
     class FrozenDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return cls(2026, month, day, hour, tzinfo=tz)
+            return cls(2026, 10, 21, hour, minute, tzinfo=tz)
 
     monkeypatch.setattr(account_rotator, "datetime", FrozenDatetime)
-    assert account_rotator.get_seconds_until_pacific_midnight() == expected
+    assert account_rotator.get_seconds_until_quota_reset() == expected
 
 
 @pytest.mark.asyncio

@@ -117,16 +117,16 @@ function toggleAllModels() {
   forceExpandAllModels.value = !forceExpandAllModels.value
 }
 
-// 美西午夜刷新倒计时计算
-const hoursUntilPacificMidnight = computed(() => {
+// 配额刷新倒计时（北京时间 15:00 跨天，固定 UTC+8）
+const hoursUntilQuotaReset = computed(() => {
   const now = new Date()
-  // 计算基于 UTC-8（美西冬令时/夏令时标准区间）
-  const utcNow = now.getTime() + now.getTimezoneOffset() * 60000
-  const pacificOffsetHours = -8
-  const pacificNow = new Date(utcNow + 3600000 * pacificOffsetHours)
-  const hoursLeft = 23 - pacificNow.getHours()
-  const minutesLeft = 59 - pacificNow.getMinutes()
-  return `${hoursLeft} 小时 ${minutesLeft} 分`
+  const reset = new Date(now)
+  reset.setUTCHours(7, 0, 0, 0) // 北京时间 15:00 == 07:00 UTC
+  if (reset.getTime() <= now.getTime()) reset.setUTCDate(reset.getUTCDate() + 1)
+  const remaining = reset.getTime() - now.getTime()
+  const hours = Math.floor(remaining / 3600000)
+  const minutes = Math.floor((remaining % 3600000) / 60000)
+  return `${hours} 小时 ${minutes} 分`
 })
 
 // 清理幽灵残留状态
@@ -288,7 +288,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         <!-- Quota Reset Functional Info -->
         <div class="flex items-center gap-1.5 text-xs text-gray-500 font-mono shrink-0">
           <Clock class="w-3.5 h-3.5 text-gray-400" />
-          <span>每日配额刷新 (00:00 PST): 还剩 {{ hoursUntilPacificMidnight }}</span>
+          <span>每日配额刷新 (北京时间 15:00): 还剩 {{ hoursUntilQuotaReset }}</span>
         </div>
       </div>
     </div>
